@@ -56,6 +56,9 @@ from src.cleaning import clean_inventory_df, save_cleaned_inventory
 from src.forecast import compute_reorder_plan
 from src.detect import detect_shelf_gaps
 
+# ------ Project tools (reused in agent) ------
+from src.tools import tool_load_inventory, tool_lookup_sku, tool_reorder_plan
+
 # =============================
 # Streamlit App Configuration
 # =============================
@@ -243,6 +246,35 @@ if page == "Chat":
             with st.chat_message("assistant"):
                 st.markdown(policy_msg)
         else:
+            # Optional intent helpers before executing the graph
+            ctx_msgs = []
+
+            # quick summary intent
+            if any(k in lower_q for k in ["summary", "overview", "snapshot", "status"]):
+                try:
+                    ctx_msgs.append({"role": "system", "content": tool_load_inventory(DATA_PROCESSED)})
+                except Exception as e:
+                    ctx_msgs.append({"role": "system", "content": f"Inventory summary unavailable: {e}"})
+
+            # simple SKU extraction intent
+            m = re.search(r"(?:^|\b)sku\s*[:#]?\s*([\w\-]+)", prompt, flags=re.IGNORECASE)
+            if m:
+                sku_id = m.group(1)
+                try:
+                    ctx_msgs.append({"role": "system", "content": tool_lookup_sku(sku_id, DATA_PROCESSED)})
+                except Exception as e:
+                    ctx_msgs.append({"role": "system", "content": f"Lookup error for SKU {sku_id}: {e}"})
+
+            # reorder plan intent (only if not a specific SKU request)
+            if any(k in lower_q for k in ["reorder plan", "reorder", "restock plan", "restock"]) and not m:
+                try:
+                    ctx_msgs.append({"role": "system", "content": tool_reorder_plan(20, DATA_PROCESSED)})
+                except Exception as e:
+                    ctx_msgs.append({"role": "system", "content": f"Reorder plan unavailable: {e}"})
+
+            if ctx_msgs:
+                st.session_state.chat_messages.extend(ctx_msgs)
+
             # Execute graph
             state_in: MessagesState = {"messages": st.session_state.chat_messages}
             state_out = app_graph.invoke(state_in)
@@ -267,60 +299,8 @@ if page == "Chat":
             - 🧭 Routing: Add a simple router node to send timeline questions to a different policy.
             """
         )
+
+
 # =============================
+# --- End of File ---
 # =============================
-# --- Tool implementations ---
-# =============================
-def tool_load_inventory() -> str:
-    """Summarize the current processed inventory dataset."""
-    fp = DATA_PROCESSED / "inventory_clean.csv"
-    if not fp.exists():
-        return "No processed inventory found. Please upload/clean data first."
-    df = pd.read_csv(fp)
-    summary = {
-        "unique_sku": int(df["sku"].nunique()),
-        "total_on_hand": int(df.get("on_hand", pd.Series(dtype=float)).sum()),
-        "avg_daily_sales_mean": float(round(df.get("avg_daily_sales", pd.Series(dtype=float)).mean() or 0.0, 3)),
-    }
-    return f"Inventory summary: {summary}"
-
-
-def tool_lookup_sku(sku: str) -> str:
-    """Return a terse availability line for a given SKU from processed data."""
-    fp = DATA_PROCESSED / "inventory_clean.csv"
-    if not fp.exists():
-        return "No processed inventory found. Please upload/clean data first."
-
-    df = pd.read_csv(fp)
-
-    # Exact match first
-    row = df.loc[df["sku"].astype(str).str.lower() == str(sku).lower()]
-    if row.empty:
-        # Fallback: contains match
-        row = df[df["sku"].astype(str).str.contains(str(sku), case=False, na=False)].head(1)
-    if row.empty:
-        return f"SKU {sku}: not found in processed inventory."
-
-    r = row.iloc[0]
-    on_hand = int(r.get("on_hand", 0))
-    backroom = int(r.get("backroom_units", 0))
-    shelf = int(r.get("shelf_units", 0))
-    lead = float(r.get("lead_time_days", 0))
-    ads = float(r.get("avg_daily_sales", 0))
-    days_cover = round(on_hand / ads, 2) if ads > 0 else None
-
-    parts = [f"SKU {r['sku']}: on_hand={on_hand}", f"shelf={shelf}", f"backroom={backroom}"]
-    if days_cover is not None:
-        parts.append(f"days_cover≈{days_cover}")
-    if lead:
-        parts.append(f"lead_time_days={lead}")
-    return ", ".join(parts)
-def tool_reorder_plan(top_n: int = 20) -> str:
-    """Compute reorder plan and return top N rows as CSV snippet."""
-    fp = DATA_PROCESSED / "inventory_clean.csv"
-    if not fp.exists():
-        return "No processed inventory found. Please upload/clean data first."
-    df = pd.read_csv(fp)
-    plan = compute_reorder_plan(df)
-    plan = plan.sort_values("reorder_qty", ascending=False).head(top_n)
-    return plan.to_csv(index=False)
