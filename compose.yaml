@@ -1,0 +1,6 @@
+services:
+  backroom:
+    image: backroom
+    build:
+      context: .
+      dockerfile: ./Dockerfile

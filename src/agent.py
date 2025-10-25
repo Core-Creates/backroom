@@ -11,7 +11,7 @@ from langchain_openai import ChatOpenAI
 
 # --- Backroom domain helpers (reuse your modules)
 from cleaning import clean_inventory_df
-from forcast import compute_reorder_plan
+from forecast import compute_reorder_plan
 from detect import detect_shelf_gaps
 
 DATA_PROCESSED = Path(__file__).resolve().parents[1] / "data" / "processed"
