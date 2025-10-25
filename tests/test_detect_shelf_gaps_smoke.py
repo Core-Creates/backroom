@@ -1,6 +1,7 @@
 import numpy as np
 from PIL import Image
 from pathlib import Path
+from src.detect import detect_shelf_gaps
 
 def test_detect_shelf_gaps_smoke(tmp_path: Path):
     # Create a mostly uniform image with one noisy strip (fake product band)

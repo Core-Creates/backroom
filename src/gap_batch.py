@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional, Iterable, Tuple, List
 
 from PIL import UnidentifiedImageError
-from detect_shelf_gaps import detect_shelf_gaps  # import from your module
+from src.detect import detect_shelf_gaps  # import from your module
 from tqdm.auto import tqdm
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
