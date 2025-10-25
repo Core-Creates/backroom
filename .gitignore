@@ -207,19 +207,14 @@ marimo/_lsp/
 __marimo__/
 # Data & outputs
 out/
-data/**/*.parquet
 data/**/*.csv
-*.parquet
 *.feather
 *.arrow
-*.duckdb
 
 .DS_Store
 Thumbs.db
 out/
 *.csv
-*.parquet
-*.duckdb
 
 m5_out/
 
