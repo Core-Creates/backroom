@@ -361,6 +361,11 @@ def main(argv=None) -> int:
     print(f"Report: {out_report}")
     print(f"Clean CSV: {out_csv}")
 
+     # DuckDB export
+    if args.to_duckdb:
+        db_path = args.duckdb_path or os.path.join(args.out_dir, "m5.duckdb")
+        write_duckdb(out_csv, db_path, args.duckdb_table)
+
     # ---- Post-processing ----
     # Parquet export
     if args.to_parquet:
