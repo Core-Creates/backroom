@@ -1,5 +1,4 @@
-"""
-Backroom — Inventory Intelligence + Chatbot (Streamlit + LangGraph + DuckDB)
+""" Backroom — Inventory Intelligence + Chatbot (Streamlit + LangGraph + DuckDB) 
 ----------------------------------------------------------------------------
 Single-file Streamlit app that provides:
 1) Inventory workflow (overview → upload/clean → reorder forecast → shelf-gaps demo)
@@ -12,7 +11,7 @@ Single-file Streamlit app that provides:
 Run locally
 ----------
 # 1) Install deps
-pip install -U streamlit langgraph openai typing_extensions pydantic pandas numpy duckdb pillow
+pip install -U streamlit langgraph openai typing_extensions pydantic pandas numpy duckdb pillow pyarrow
 
 # 2) Your project utilities (expected in ./src)
 #    src/utils.py     -> ensure_dirs, get_data_paths, logger
@@ -196,15 +195,19 @@ with st.sidebar:
 # =============================
 if page == "Overview":
     st.subheader("Processed Inventory Snapshot")
-    processed_fp = DATA_PROCESSED / "inventory_clean.csv"
+    processed_fp_csv = DATA_PROCESSED / "inventory_clean.csv"
+    processed_fp_parq = DATA_PROCESSED / "inventory_clean.parquet"
 
-    # Prefer DuckDB when available, else fall back to CSV
+    # Prefer DuckDB when available, else fall back to local files
     df = None
     if DB.enabled:
         df = DB.read_inventory_df()
 
-    if df is None and processed_fp.exists():
-        df = pd.read_csv(processed_fp)
+    if df is None:
+        if processed_fp_parq.exists():
+            df = pd.read_parquet(processed_fp_parq)
+        elif processed_fp_csv.exists():
+            df = pd.read_csv(processed_fp_csv)
 
     if isinstance(df, pd.DataFrame) and not df.empty:
         c1, c2, c3 = st.columns(3)
@@ -220,19 +223,43 @@ if page == "Overview":
         st.info("No processed inventory found yet. Go to 'Upload & Clean' to ingest data.")
 
 elif page == "Upload & Clean":
-    st.subheader("Upload Inventory CSV")
+    st.subheader("Upload Inventory CSV or Parquet")
     st.markdown(
-        "Upload a CSV with columns like: `sku, product_name, on_hand, backroom_units, shelf_units, avg_daily_sales, lead_time_days`"
+        "Upload a **CSV or Parquet** with columns like: `sku, product_name, on_hand, backroom_units, shelf_units, avg_daily_sales, lead_time_days`"
     )
-    uploaded = st.file_uploader("inventory.csv", type=["csv"])
+    uploaded = st.file_uploader("inventory.(csv|parquet)", type=["csv", "parquet"])
     if uploaded is not None:
-        raw_fp = DATA_RAW / "inventory.csv"
+        # Preserve original filename/extension
+        raw_name = uploaded.name
+        raw_fp = DATA_RAW / raw_name
         raw_fp.write_bytes(uploaded.read())
         st.success(f"Saved raw file → {raw_fp}")
-        df = pd.read_csv(raw_fp)
+
+        # Load depending on extension
+        ext = raw_name.lower().rsplit(".", 1)[-1]
+        if ext == "parquet":
+            df = pd.read_parquet(raw_fp)
+        else:
+            df = pd.read_csv(raw_fp)
+
         cleaned = clean_inventory_df(df)
-        out_fp = save_cleaned_inventory(cleaned, DATA_PROCESSED / "inventory_clean.csv")
-        st.success(f"Cleaned & saved → {out_fp}")
+
+        # Keep existing CSV path
+        out_csv = DATA_PROCESSED / "inventory_clean.csv"
+        out_fp = save_cleaned_inventory(cleaned, out_csv)
+
+        # Parquet filename mirrors the uploaded file's basename
+        stem = Path(raw_name).stem  # e.g., "store_a_2025_10_25" from "store_a_2025_10_25.csv"
+        out_parquet = DATA_PROCESSED / f"{stem}_clean.parquet"
+        try:
+            cleaned.to_parquet(out_parquet, index=False)
+            st.success(
+                f"Cleaned & saved (CSV) → {out_fp}\n\n"
+                f"Cleaned & saved (Parquet) → {out_parquet}"
+            )
+        except Exception as e:
+            st.warning(f"Parquet save skipped: {e}")
+
         st.dataframe(cleaned.head(100), use_container_width=True)
 
         # NEW: persist to DuckDB if available
@@ -245,15 +272,18 @@ elif page == "Upload & Clean":
 
 elif page == "Forecast":
     st.subheader("Reorder Planning")
-    processed_fp = DATA_PROCESSED / "inventory_clean.csv"
+    processed_fp_csv = DATA_PROCESSED / "inventory_clean.csv"
+    processed_fp_parq = DATA_PROCESSED / "inventory_clean.parquet"
 
-    # Prefer DuckDB inventory
+    # Prefer DuckDB inventory, else local files
     df = DB.read_inventory_df() if DB.enabled else None
     if df is None:
-        if not processed_fp.exists():
-            st.warning("No processed data yet. Upload & clean first.")
+        if processed_fp_parq.exists():
+            df = pd.read_parquet(processed_fp_parq)
+        elif processed_fp_csv.exists():
+            df = pd.read_csv(processed_fp_csv)
         else:
-            df = pd.read_csv(processed_fp)
+            st.warning("No processed data yet. Upload & clean first.")
 
     if isinstance(df, pd.DataFrame):
         plan = compute_reorder_plan(df)
@@ -287,7 +317,6 @@ elif page == "Shelf Gaps (Vision)":
                     st.warning(f"Could not persist shelf gap for {f.name}: {e}")
 
         st.dataframe(pd.DataFrame(results), use_container_width=True)
-
 
 elif page == "Admin (DB Browser)":
     st.subheader("🗄️ Admin — Browse DuckDB Tables")
@@ -527,7 +556,6 @@ if page == "Chat":
               ```
             """
         )
-
 
 # =============================
 # --- End of File ---
