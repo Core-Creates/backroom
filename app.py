@@ -1,23 +1,26 @@
+
 """
-Backroom — Inventory Intelligence + Chatbot (Streamlit + LangGraph)
-------------------------------------------------------------------
+Backroom — Inventory Intelligence + Chatbot (Streamlit + LangGraph + DuckDB)
+----------------------------------------------------------------------------
 Single-file Streamlit app that provides:
 1) Inventory workflow (overview → upload/clean → reorder forecast → shelf-gaps demo)
 2) A guarded chatbot powered by LangGraph that ONLY answers about:
    - Inventory (stock, availability, quantities),
    - Timelines (schedules, deadlines, ETAs, roadmaps), and
    - Future predictions (forecasts, projections, outlooks, trends).
+3) NEW: Persistent storage using DuckDB (optional but recommended).
 
 Run locally
 ----------
 # 1) Install deps
-pip install -U streamlit langgraph openai typing_extensions pydantic pandas
+pip install -U streamlit langgraph openai typing_extensions pydantic pandas numpy duckdb pillow
 
 # 2) Your project utilities (expected in ./src)
-#    src/utils.py  -> ensure_dirs, get_data_paths, logger
-#    src/cleaning.py -> clean_inventory_df, save_cleaned_inventory
-#    src/forecast.py -> compute_reorder_plan
-#    src/detect.py   -> detect_shelf_gaps
+#    src/utils.py     -> ensure_dirs, get_data_paths, logger
+#    src/cleaning.py  -> clean_inventory_df, save_cleaned_inventory
+#    src/forecast.py  -> compute_reorder_plan
+#    src/detect.py    -> detect_shelf_gaps
+#    src/tools.py     -> tool_load_inventory, tool_lookup_sku, tool_reorder_plan, tool_detect_gap
 
 # 3) Environment
 export OPENAI_API_KEY="sk-..."              # or setx on Windows
@@ -26,6 +29,8 @@ export OPENAI_API_KEY="sk-..."              # or setx on Windows
 # Optional model override:
 # export OPENAI_MODEL="gpt-4o-mini"
 # export MODEL_TEMPERATURE="0.4"
+# Optional DuckDB path (defaults to ./data/backroom.duckdb)
+# export DUCKDB_PATH="./data/backroom.duckdb"
 
 # 4) Launch
 streamlit run app.py
@@ -45,6 +50,12 @@ import streamlit as st
 import pandas as pd
 from openai import OpenAI
 import numpy as np
+
+# --- NEW: DuckDB (optional persistence) ---
+try:
+    import duckdb  # type: ignore
+except Exception as _duckdb_import_err:
+    duckdb = None  # graceful fallback without persistence
 
 # --- LangGraph ---
 from langgraph.graph import StateGraph, END
@@ -75,12 +86,107 @@ ensure_dirs()
 DATA_RAW, DATA_PROCESSED, SHELVES = get_data_paths()
 
 # =============================
+# NEW: DuckDB helper (optional)
+# =============================
+class DB:
+    """Tiny helper around DuckDB. App works if DuckDB is missing (falls back to CSV files)."""
+    con = None
+    enabled = False
+    db_path = None
+
+    @classmethod
+    def init(cls):
+        db_path = os.environ.get("DUCKDB_PATH", str(Path("data") / "backroom.duckdb"))
+        cls.db_path = db_path
+        if duckdb is None:
+            return
+        try:
+            # Ensure parent dir exists
+            Path(db_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+            cls.con = duckdb.connect(db_path)
+            cls.enabled = True
+            # Create tables if not exists
+            cls.con.execute("""
+                CREATE TABLE IF NOT EXISTS inventory (
+                    sku TEXT,
+                    product_name TEXT,
+                    on_hand DOUBLE,
+                    backroom_units DOUBLE,
+                    shelf_units DOUBLE,
+                    avg_daily_sales DOUBLE,
+                    lead_time_days DOUBLE
+                );
+            """)
+            cls.con.execute("""
+                CREATE TABLE IF NOT EXISTS shelf_gaps (
+                    image TEXT,
+                    gap_score DOUBLE,
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT current_timestamp
+                );
+            """)
+            cls.con.execute("""
+                CREATE TABLE IF NOT EXISTS chat_logs (
+                    role TEXT,
+                    content TEXT,
+                    created_at TIMESTAMP DEFAULT current_timestamp
+                );
+            """)
+        except Exception as e:
+            # Log, but do not break the app
+            logging.exception("DuckDB initialization failed: %s", e)
+            cls.con = None
+            cls.enabled = False
+
+    @classmethod
+    def upsert_inventory_df(cls, df: pd.DataFrame):
+        """Create/replace inventory table from a cleaned dataframe."""
+        if not cls.enabled or df is None or df.empty:
+            return
+        # Register DF then replace table
+        cls.con.register("df_inv", df)
+        cls.con.execute("CREATE OR REPLACE TABLE inventory AS SELECT * FROM df_inv;")
+        cls.con.unregister("df_inv")
+
+    @classmethod
+    def read_inventory_df(cls) -> pd.DataFrame | None:
+        if not cls.enabled:
+            return None
+        try:
+            return cls.con.execute("SELECT * FROM inventory").fetch_df()
+        except Exception:
+            return None
+
+    @classmethod
+    def insert_shelf_gap(cls, image: str, gap_score: float, notes: str):
+        if not cls.enabled:
+            return
+        cls.con.execute(
+            "INSERT INTO shelf_gaps(image, gap_score, notes) VALUES (?, ?, ?)",
+            [image, float(gap_score), str(notes or "")],
+        )
+
+    @classmethod
+    def log_chat(cls, role: str, content: str):
+        if not cls.enabled:
+            return
+        cls.con.execute("INSERT INTO chat_logs(role, content) VALUES (?, ?)", [role, content])
+
+DB.init()
+
+# =============================
 # Sidebar & Navigation
 # =============================
-page = st.sidebar.radio(
-    "Navigation",
-    ["Overview", "Upload & Clean", "Forecast", "Shelf Gaps (Vision)", "Chat"],
-)
+with st.sidebar:
+    st.markdown("**Storage**")
+    if DB.enabled:
+        st.success(f"DuckDB: ON  \n`{DB.db_path}`")
+    else:
+        st.info("DuckDB: OFF (using CSV files only)")
+    page = st.radio(
+        "Navigation",
+        ["Overview", "Upload & Clean", "Forecast", "Shelf Gaps (Vision)", "Chat"],
+    )
 
 # =============================
 # Pages 1–4: Inventory Workflow
@@ -88,11 +194,19 @@ page = st.sidebar.radio(
 if page == "Overview":
     st.subheader("Processed Inventory Snapshot")
     processed_fp = DATA_PROCESSED / "inventory_clean.csv"
-    if processed_fp.exists():
+
+    # Prefer DuckDB when available, else fall back to CSV
+    df = None
+    if DB.enabled:
+        df = DB.read_inventory_df()
+
+    if df is None and processed_fp.exists():
         df = pd.read_csv(processed_fp)
+
+    if isinstance(df, pd.DataFrame) and not df.empty:
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.metric("Unique SKUs", df["sku"].nunique())
+            st.metric("Unique SKUs", int(df["sku"].nunique()))
         with c2:
             st.metric("Total On-Hand", int(df.get("on_hand", pd.Series(dtype=float)).sum()))
         with c3:
@@ -118,13 +232,27 @@ elif page == "Upload & Clean":
         st.success(f"Cleaned & saved → {out_fp}")
         st.dataframe(cleaned.head(100), use_container_width=True)
 
+        # NEW: persist to DuckDB if available
+        if DB.enabled:
+            try:
+                DB.upsert_inventory_df(cleaned)
+                st.success("Persisted cleaned inventory to DuckDB (table: `inventory`).")
+            except Exception as e:
+                st.warning(f"DuckDB persistence skipped: {e}")
+
 elif page == "Forecast":
     st.subheader("Reorder Planning")
     processed_fp = DATA_PROCESSED / "inventory_clean.csv"
-    if not processed_fp.exists():
-        st.warning("No processed data yet. Upload & clean first.")
-    else:
-        df = pd.read_csv(processed_fp)
+
+    # Prefer DuckDB inventory
+    df = DB.read_inventory_df() if DB.enabled else None
+    if df is None:
+        if not processed_fp.exists():
+            st.warning("No processed data yet. Upload & clean first.")
+        else:
+            df = pd.read_csv(processed_fp)
+
+    if isinstance(df, pd.DataFrame):
         plan = compute_reorder_plan(df)
         st.dataframe(plan, use_container_width=True)
         csv = plan.to_csv(index=False).encode("utf-8")
@@ -141,13 +269,20 @@ elif page == "Shelf Gaps (Vision)":
             out = SHELVES / f.name
             out.write_bytes(f.read())
             gaps = detect_shelf_gaps(out)
-            results.append(
-                {
-                    "image": f.name,
-                    "gap_score": gaps.get("gap_score", 0.0),
-                    "notes": gaps.get("notes", ""),
-                }
-            )
+            row = {
+                "image": f.name,
+                "gap_score": float(gaps.get("gap_score", 0.0)),
+                "notes": gaps.get("notes", ""),
+            }
+            results.append(row)
+
+            # NEW: persist result to DuckDB if available
+            if DB.enabled:
+                try:
+                    DB.insert_shelf_gap(row["image"], row["gap_score"], row["notes"])
+                except Exception as e:
+                    st.warning(f"Could not persist shelf gap for {f.name}: {e}")
+
         st.dataframe(pd.DataFrame(results), use_container_width=True)
 
 # =============================
@@ -165,7 +300,7 @@ if page == "Chat":
             st.session_state.pop("chat_messages", None)
             st.success("Conversation cleared.")
         st.caption(
-            "Env vars respected: OPENAI_API_KEY, OPENAI_BASE_URL (optional), OPENAI_MODEL, MODEL_TEMPERATURE"
+            "Env vars respected: OPENAI_API_KEY, OPENAI_BASE_URL (optional), OPENAI_MODEL, MODEL_TEMPERATURE, DUCKDB_PATH"
         )
 
     # -------------
@@ -228,6 +363,8 @@ if page == "Chat":
         st.session_state.chat_messages.append(user_msg)
         with st.chat_message("user"):
             st.markdown(prompt)
+        # NEW: persist user message to DuckDB
+        DB.log_chat("user", prompt)
 
         # Guardrail: allow only inventory, timelines, and future predictions
         allowed_keywords = [
@@ -250,6 +387,7 @@ if page == "Chat":
             st.session_state.chat_messages.append(assistant_msg)
             with st.chat_message("assistant"):
                 st.markdown(policy_msg)
+            DB.log_chat("assistant", policy_msg)
         else:
             # Optional intent helpers before executing the graph
             ctx_msgs = []
@@ -298,7 +436,9 @@ if page == "Chat":
             if assistant_msg and assistant_msg.get("role") == "assistant":
                 st.session_state.chat_messages.append(assistant_msg)
                 with st.chat_message("assistant"):
-                    st.markdown(assistant_msg["content"])  
+                    st.markdown(assistant_msg["content"])
+                # NEW: persist assistant reply
+                DB.log_chat("assistant", assistant_msg["content"])
             else:
                 st.error("No response from the model. Check API credentials and model name.")
 
@@ -311,6 +451,12 @@ if page == "Chat":
             - 📚 RAG: prepend retrieved inventory rows before the LLM call.
             - ⏱️ Streaming: swap `.invoke` with `.stream` and render tokens incrementally.
             - 🧭 Routing: Add a simple router node to send timeline questions to a different policy.
+            - 🗄️ Storage: With DuckDB enabled, inspect data via the CLI:
+              ```bash
+              duckdb "$DUCKDB_PATH"  # e.g., data/backroom.duckdb
+              DESCRIBE SELECT * FROM inventory;
+              SELECT COUNT(*) FROM chat_logs;
+              ```
             """
         )
 
