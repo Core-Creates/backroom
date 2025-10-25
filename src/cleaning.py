@@ -22,6 +22,10 @@ REQUIRED_COLS = [
 
 NUMERIC_COLS = ["on_hand", "backroom_units", "shelf_units", "avg_daily_sales", "lead_time_days"]
 
+# Tunables used during derivation (when fields are missing)
+DEFAULT_LEAD_TIME_DAYS = 7
+ROLLING_WINDOW_DAYS = 7
+
 # ------------------------------------
 # Header aliasing (liberal acceptance)
 # ------------------------------------
@@ -142,25 +146,110 @@ def _auto_map_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
 
     return df2, rename_map
 
+def _derive_missing_columns(df: pd.DataFrame, missing: list) -> pd.DataFrame:
+    """
+    Try to derive/default required columns from available context (sold_qty, date/d, etc.).
+    Only touches columns that are missing.
+    """
+    df = df.copy()
+
+    # Ensure SKU string formatting for any derivations that depend on it
+    if "sku" in df.columns:
+        df["sku"] = df["sku"].astype(str).strip()
+
+    # product_name ← sku (fallback)
+    if "product_name" in missing and "sku" in df.columns:
+        df["product_name"] = df["sku"].astype(str)
+        logger.info("Derived product_name from sku")
+
+    # backroom/shelf defaults
+    if "backroom_units" in missing:
+        df["backroom_units"] = 0
+        logger.info("Defaulted backroom_units=0")
+    if "shelf_units" in missing:
+        df["shelf_units"] = 0
+        logger.info("Defaulted shelf_units=0")
+
+    # on_hand ← backroom + shelf (if either was missing, they now exist)
+    if "on_hand" in missing:
+        if {"backroom_units", "shelf_units"}.issubset(df.columns):
+            df["on_hand"] = df["backroom_units"].fillna(0) + df["shelf_units"].fillna(0)
+            logger.info("Derived on_hand from backroom_units + shelf_units")
+
+    # avg_daily_sales derivation
+    if "avg_daily_sales" in missing:
+        if "sold_qty" in df.columns:
+            # Choose an ordering column: prefer 'date', else 'd' (e.g., M5 day index), else group order
+            order_col = None
+            if "date" in df.columns:
+                # Parse date if needed
+                if not np.issubdtype(df["date"].dtype, np.datetime64):
+                    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+                order_col = "date"
+            elif "d" in df.columns:
+                order_col = "d"
+
+            # We need a key to group on; assume sku exists per schema
+            key = "sku" if "sku" in df.columns else None
+
+            if key:
+                if order_col:
+                    df = df.sort_values([key, order_col])
+                else:
+                    df = df.sort_values([key])
+
+                # Rolling 7-day (or 7-row if no date/d) mean per SKU
+                df["avg_daily_sales"] = (
+                    df.groupby(key, group_keys=False)["sold_qty"]
+                      .rolling(ROLLING_WINDOW_DAYS, min_periods=1)
+                      .mean()
+                      .reset_index(level=0, drop=True)
+                )
+                logger.info(f"Derived avg_daily_sales from sold_qty with a {ROLLING_WINDOW_DAYS}-row rolling mean"
+                            f"{' using ' + order_col if order_col else ' (group order)'}")
+            else:
+                # Fallback: global mean if no key (shouldn't happen with REQUIRED sku)
+                df["avg_daily_sales"] = float(pd.to_numeric(df["sold_qty"], errors="coerce").fillna(0).mean())
+                logger.warning("Derived avg_daily_sales using global mean (no SKU key found)")
+        else:
+            # If we cannot compute from sales, default to zero (keeps pipeline running)
+            df["avg_daily_sales"] = 0.0
+            logger.warning("avg_daily_sales defaulted to 0.0 (sold_qty not available)")
+
+    # lead_time_days default
+    if "lead_time_days" in missing:
+        df["lead_time_days"] = float(DEFAULT_LEAD_TIME_DAYS)
+        logger.info(f"Defaulted lead_time_days={DEFAULT_LEAD_TIME_DAYS}")
+
+    return df
+
 def _ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Apply robust header normalization + alias mapping, then verify all REQUIRED_COLS exist.
-    Raises a detailed ValueError if any are missing.
+    Apply robust header normalization + alias mapping, then verify/derive REQUIRED_COLS.
+    Raises a detailed ValueError if any are missing after derivation.
     """
-    # First, lowercase/strip for safety (no destructive renames here)
+    # First, strip column labels for safety (no destructive renames here)
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
 
     # Auto-map to canonical names
     df, rename_log = _auto_map_columns(df)
 
+    # Identify missing
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
+
+    # Try derivations/defaults for any missing required fields
     if missing:
+        df = _derive_missing_columns(df, missing)
+
+    # Re-check after derivations
+    missing_after = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing_after:
         # Helpful diagnostics: what we saw (normalized) and what we mapped
         normalized_seen = [_normalize(c) for c in df.columns]
         msg = (
-            "Missing required columns: "
-            f"{missing}\n"
+            "Missing required columns after derivation: "
+            f"{missing_after}\n"
             f"Headers present (post-mapping): {list(df.columns)}\n"
             f"Normalized seen: {normalized_seen}\n"
             f"Auto-mapped: {rename_log or '{}'}\n"
@@ -191,7 +280,7 @@ def clean_inventory_df(
 
     Steps performed
     ---------------
-    1) Standardize/rename headers to the canonical schema (robust alias mapping).
+    1) Standardize/rename headers to the canonical schema (robust alias mapping + derivations).
     2) Coerce numeric fields (invalid → 0).
     3) Preserve SKU formatting (string; leading zeros intact).
     4) Trim product_name.
@@ -203,7 +292,7 @@ def clean_inventory_df(
     7) Clip negatives to 0.
     8) (Optional) Enforce output column ordering.
     """
-    # 1) Normalize headers with robust auto-mapping
+    # 1) Normalize headers with robust auto-mapping + derivations
     df = _standardize_columns(df)
 
     # Secondary guard (shouldn’t trigger unless the file is truly missing fields)
