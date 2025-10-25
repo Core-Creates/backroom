@@ -100,8 +100,13 @@ def clean_inventory_df(
         days = np.where(avg > 0, onh / avg, 0.0)
     df["days_of_cover"] = np.maximum(days, 0)
 
-    # Restock signal
-    df["restock_needed"] = (df["shelf_units"] < shelf_low_threshold) & (df["backroom_units"] > 0)
+    # Restock signal — produce Python bools (not numpy.bool_)    
+    df["restock_needed"] = (
+    ((df["shelf_units"] < shelf_low_threshold) & (df["backroom_units"] > 0))
+    .astype(object)
+    .map(bool)
+)
+
 
     # Optional safety_stock default (used later in forecasting)
     if add_safety_stock_if_missing and "safety_stock" not in df.columns:

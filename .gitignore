@@ -222,3 +222,10 @@ out/
 *.duckdb
 
 m5_out/
+
+.venv/
+
+.nox/
+
+# MLflow
+mlruns/
