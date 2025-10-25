@@ -36,13 +36,19 @@ ID_COLS = ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
 CAL_KEEP = [
     "d", "date", "wm_yr_wk", "weekday", "wday", "month", "year",
     "event_name_1", "event_type_1", "event_name_2", "event_type_2",
-    "snap_CA", "snap_TX", "snap_WI",
+    "snap_ca", "snap_tx", "snap_wi",
 ]
 PRICES_KEEP = ["store_id", "item_id", "wm_yr_wk", "sell_price"]
 D_COL_PREFIX = "d_"
 
 def _read_csv_any(path_or_buf, **kw) -> pd.DataFrame:
-    return pd.read_csv(path_or_buf, dtype=str, keep_default_na=False, na_values=list(MISSING_SENTINELS), **kw)
+    return pd.read_csv(
+        path_or_buf,
+        dtype=str,
+        keep_default_na=False,
+        na_values=list(MISSING_SENTINELS),
+        **kw,
+    )
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -73,6 +79,10 @@ def _to_int(x: Any):
 
 def _to_date_series(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce")
+
+def _q_ident(s: str) -> str:
+    """Quote an identifier for DuckDB safely."""
+    return '"' + str(s).replace('"', '""') + '"'
 
 @dataclass
 class CleanStats:
@@ -117,13 +127,27 @@ def sales_wide_to_long(sales_wide: pd.DataFrame) -> pd.DataFrame:
     return long_df
 
 def join_calendar_prices(long_df: pd.DataFrame, calendar: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+    # Keep only required calendar columns that exist (using lowercased normalized names)
     calendar = calendar[[c for c in CAL_KEEP if c in calendar.columns]].copy()
+
+    # Clean textual calendar fields
     for c in ["date", "weekday", "event_name_1", "event_type_1", "event_name_2", "event_type_2"]:
         if c in calendar.columns:
             calendar[c] = calendar[c].map(_strip).astype("string")
     if "date" in calendar.columns:
         calendar["date"] = _to_date_series(calendar["date"])
 
+    # Ensure we have a proper 'd' column in calendar; synthesize if missing
+    if "d" in calendar.columns:
+        calendar["d"] = calendar["d"].astype("string").str.strip()
+        cal_map = calendar
+    else:
+        # Fallback: synthesize d_1..d_N from row order (best-effort if a non-Kaggle calendar is passed)
+        cal_map = calendar.reset_index().rename(columns={"index": "d_index"})
+        cal_map["d"] = cal_map["d_index"].add(1).map(lambda x: f"d_{x}").astype("string")
+        cal_map.drop(columns=["d_index"], inplace=True)
+
+    # Prepare prices
     prices = prices[[c for c in PRICES_KEEP if c in prices.columns]].copy()
     for c in ["store_id", "item_id", "wm_yr_wk"]:
         if c in prices.columns:
@@ -131,15 +155,10 @@ def join_calendar_prices(long_df: pd.DataFrame, calendar: pd.DataFrame, prices: 
     if "sell_price" in prices.columns:
         prices["sell_price"] = prices["sell_price"].map(_to_float).astype("Float64")
 
-    if "d" not in calendar.columns:
-        cal_map = calendar.reset_index().rename(columns={"index": "d_index"})
-        cal_map["d"] = cal_map["d_index"].add(1).map(lambda x: f"d_{x}").astype("string")
-        cal_map.drop(columns=["d_index"], inplace=True)
-    else:
-        cal_map = calendar
-
+    # Merge calendar
     out = long_df.merge(cal_map, on="d", how="left", validate="m:1")
 
+    # Merge prices if keys are present
     price_keys = [k for k in ["store_id", "item_id", "wm_yr_wk"] if k in out.columns and k in prices.columns]
     if len(price_keys) == 3:
         out = out.merge(prices, on=price_keys, how="left", validate="m:1")
@@ -176,7 +195,7 @@ def build_report(stats: CleanStats, nulls_by_col: Dict[str, int], notes: str) ->
     print(notes, file=s)
     return s.getvalue()
 
-# ---- Parquet helpers (single-file or partitioned) ----
+# ---- DuckDB helper ----
 def write_duckdb(out_csv: str, db_path: str, table_name: str = "m5_clean_long") -> None:
     """
     Create (or open) a DuckDB database and load the cleaned CSV into a table.
@@ -191,16 +210,16 @@ def write_duckdb(out_csv: str, db_path: str, table_name: str = "m5_clean_long") 
         ) from e
 
     con = duckdb.connect(db_path)
-    # Create or replace the table using DuckDB's zero-copy CSV reader
-    con.execute(f"DROP TABLE IF EXISTS {duckdb.escape_identifier(table_name)};")
+    tbl = _q_ident(table_name)
+    con.execute(f"DROP TABLE IF EXISTS {tbl};")
     con.execute(f"""
-        CREATE TABLE {duckdb.escape_identifier(table_name)} AS
+        CREATE TABLE {tbl} AS
         SELECT * FROM read_csv_auto('{out_csv}', SAMPLE_SIZE=-1);
     """)
     # Optional: add a few handy indexes (comment out if not needed)
     for col in ["state_id", "store_id", "item_id", "date", "wm_yr_wk"]:
         try:
-            con.execute(f"CREATE INDEX IF NOT EXISTS idx_{col} ON {duckdb.escape_identifier(table_name)}({duckdb.escape_identifier(col)});")
+            con.execute(f"CREATE INDEX IF NOT EXISTS {_q_ident('idx_' + col)} ON {tbl}({_q_ident(col)});")
         except Exception:
             pass
     con.close()
@@ -219,7 +238,7 @@ def write_parquet_with_fallback(
     if partition_by in (None, [], ()):
         try:
             import pyarrow  # noqa: F401
-            import pandas as pd
+            import pandas as pd  # local import to emphasize optional dependency
             df = pd.read_csv(out_csv, low_memory=False)
             df.to_parquet(parquet_path, index=False)
             print(f"Parquet saved (pandas): {parquet_path}")
@@ -323,6 +342,7 @@ def main(argv=None) -> int:
     long_df = sales_wide_to_long(sales_wide)
     merged = join_calendar_prices(long_df, calendar, prices)
 
+    # Drop duplicates on (store_id, item_id, date, d) if present
     before = len(merged)
     subset = [c for c in ["store_id", "item_id", "date"] if c in merged.columns]
     if subset:
@@ -333,15 +353,24 @@ def main(argv=None) -> int:
     stats.qty_out_of_bounds = issues.get("qty_out_of_bounds", 0)
     stats.price_out_of_bounds = issues.get("price_out_of_bounds", 0)
 
+    # Preferred column ordering (all lowercased to match normalization)
     prefer = [
         "state_id","store_id","dept_id","cat_id","item_id",
         "id","d","date","wm_yr_wk","weekday","month","year",
         "event_name_1","event_type_1","event_name_2","event_type_2",
-        "snap_CA","snap_TX","snap_WI",
+        "snap_ca","snap_tx","snap_wi",
         "sold_qty","sell_price","revenue",
     ]
     cols = [c for c in prefer if c in merged.columns] + [c for c in merged.columns if c not in prefer]
     merged = merged[cols]
+
+    # Optional compaction: categories + smaller ints for SNAP flags
+    for c in ["state_id","store_id","dept_id","cat_id","weekday","event_name_1","event_type_1","event_name_2","event_type_2","wm_yr_wk"]:
+        if c in merged.columns:
+            merged[c] = merged[c].astype("category")
+    for c in ["snap_ca","snap_tx","snap_wi"]:
+        if c in merged.columns:
+            merged[c] = pd.to_numeric(merged[c], errors="coerce").astype("Int8")
 
     nulls = {c: int(merged[c].isna().sum()) for c in merged.columns}
     stats.final_rows_long = len(merged)
@@ -361,7 +390,7 @@ def main(argv=None) -> int:
     print(f"Report: {out_report}")
     print(f"Clean CSV: {out_csv}")
 
-     # DuckDB export
+    # DuckDB export
     if args.to_duckdb:
         db_path = args.duckdb_path or os.path.join(args.out_dir, "m5.duckdb")
         write_duckdb(out_csv, db_path, args.duckdb_table)

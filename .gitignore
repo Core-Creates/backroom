@@ -220,3 +220,5 @@ out/
 *.csv
 *.parquet
 *.duckdb
+
+m5_out/
