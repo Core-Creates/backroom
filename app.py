@@ -225,35 +225,100 @@ if page == "Overview":
 elif page == "Upload & Clean":
     st.subheader("Upload Inventory CSV or Parquet")
     st.markdown(
-        "Upload a **CSV or Parquet** with columns like: `sku, product_name, on_hand, backroom_units, shelf_units, avg_daily_sales, lead_time_days`"
+        "Upload a **CSV or Parquet** with columns like: "
+        "`sku, product_name, on_hand, backroom_units, shelf_units, avg_daily_sales, lead_time_days`"
     )
-    uploaded = st.file_uploader("inventory.(csv|parquet)", type=["csv", "parquet"])
-    if uploaded is not None:
-        # Preserve original filename/extension
-        raw_name = uploaded.name
-        raw_fp = DATA_RAW / raw_name
-        raw_fp.write_bytes(uploaded.read())
-        st.success(f"Saved raw file → {raw_fp}")
 
-        # Load depending on extension
-        ext = raw_name.lower().rsplit(".", 1)[-1]
-        if ext == "parquet":
-            df = pd.read_parquet(raw_fp)
-        else:
-            df = pd.read_csv(raw_fp)
+    mode = st.radio(
+        "Ingest mode",
+        ["Upload file", "Load from local path (advanced)"],
+        help=(
+            "Upload file: normal browser upload (original local path is not available).\n"
+            "Load from local path: reads directly from an absolute path on this machine."
+        )
+    )
 
+    df = None
+    source_label = None  # what we’ll show as the human-facing source path in messages
+
+    if mode == "Upload file":
+        uploaded = st.file_uploader("inventory.(csv|parquet)", type=["csv", "parquet"])
+        source_hint = st.text_input(
+            "Optional: Original source path to display (for your records only)",
+            placeholder=r"C:\Users\corri\Documents\GitHub\backroom\notebooks\sales.parquet"
+        )
+
+        if uploaded is not None:
+            raw_name = uploaded.name
+            raw_fp = DATA_RAW / raw_name
+            raw_bytes = uploaded.read()
+            raw_fp.write_bytes(raw_bytes)
+
+            # Try to display the user-provided source path; else show where we saved the upload
+            source_label = source_hint.strip() or str(raw_fp)
+            st.success(f"Saved raw file → {raw_fp}\nSource file (display) → {source_label}")
+
+            ext = raw_name.lower().rsplit(".", 1)[-1]
+            if ext == "parquet":
+                df = pd.read_parquet(raw_fp)
+            else:
+                df = pd.read_csv(raw_fp)
+
+    else:
+        # Load from an absolute path on the local filesystem
+        local_path = st.text_input(
+            "Absolute path to CSV or Parquet on this machine",
+            placeholder=r"C:\Users\corri\Documents\GitHub\backroom\notebooks\sales.parquet"
+        )
+        if st.button("Load file"):
+            try:
+                p = Path(local_path)
+                if not p.exists():
+                    st.error(f"Path not found: {p}")
+                else:
+                    source_label = str(p)
+                    st.success(f"Using local source → {source_label}")
+                    ext = p.suffix.lower().lstrip(".")
+                    if ext == "parquet":
+                        df = pd.read_parquet(p)
+                    else:
+                        df = pd.read_csv(p)
+                    # Also stash a copy into DATA_RAW to keep your current workflow consistent
+                    raw_fp = DATA_RAW / p.name
+                    raw_fp.write_bytes(p.read_bytes())
+                    st.info(f"Copied local file into raw area → {raw_fp}")
+            except Exception as e:
+                st.error(f"Failed to load local file: {e}")
+
+    # If we have a dataframe, continue with cleaning/saving/persisting
+    if df is not None:
         cleaned = clean_inventory_df(df)
 
         # Keep existing CSV path
         out_csv = DATA_PROCESSED / "inventory_clean.csv"
         out_fp = save_cleaned_inventory(cleaned, out_csv)
 
-        # Parquet filename mirrors the uploaded file's basename
-        stem = Path(raw_name).stem  # e.g., "store_a_2025_10_25" from "store_a_2025_10_25.csv"
+        # Parquet filename mirrors the *input* basename (csv or parquet), with _clean suffix
+        # If we know the original filename from upload or local path, use that stem; else default.
+        try:
+            if mode == "Upload file" and 'uploaded' in locals() and uploaded is not None:
+                stem = Path(uploaded.name).stem
+            elif mode == "Load from local path" and 'local_path' in locals() and local_path:
+                stem = Path(local_path).stem
+            else:
+                stem = "inventory"
+        except Exception:
+            stem = "inventory"
+
         out_parquet = DATA_PROCESSED / f"{stem}_clean.parquet"
+
+        # Save parquet
         try:
             cleaned.to_parquet(out_parquet, index=False)
+            # Show the human-facing “source file” label prominently
             st.success(
+                "Clean complete ✅\n\n"
+                f"Source file → {source_label or '(unknown)'}\n\n"
                 f"Cleaned & saved (CSV) → {out_fp}\n\n"
                 f"Cleaned & saved (Parquet) → {out_parquet}"
             )
@@ -262,13 +327,14 @@ elif page == "Upload & Clean":
 
         st.dataframe(cleaned.head(100), use_container_width=True)
 
-        # NEW: persist to DuckDB if available
+        # Persist to DuckDB if available
         if DB.enabled:
             try:
                 DB.upsert_inventory_df(cleaned)
                 st.success("Persisted cleaned inventory to DuckDB (table: `inventory`).")
             except Exception as e:
                 st.warning(f"DuckDB persistence skipped: {e}")
+
 
 elif page == "Forecast":
     st.subheader("Reorder Planning")
