@@ -1,4 +1,3 @@
-
 """
 Backroom — Inventory Intelligence + Chatbot (Streamlit + LangGraph + DuckDB)
 ----------------------------------------------------------------------------
@@ -51,12 +50,6 @@ import pandas as pd
 from openai import OpenAI
 import numpy as np
 
-# --- NEW: DuckDB (optional persistence) ---
-try:
-    import duckdb  # type: ignore
-except Exception as _duckdb_import_err:
-    duckdb = None  # graceful fallback without persistence
-
 # --- LangGraph ---
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -86,26 +79,37 @@ ensure_dirs()
 DATA_RAW, DATA_PROCESSED, SHELVES = get_data_paths()
 
 # =============================
-# NEW: DuckDB helper (optional)
+# DuckDB helper (uses Python module, not JS)
 # =============================
+# Use centralized Python helper (db/duckdb_helper.py) instead of any JS files.
+try:
+    from db.duckdb_helper import get_connection, db_path as _DB_PATH
+    _DUCKDB_AVAILABLE = True
+except Exception as e:
+    get_connection = None  # type: ignore
+    _DB_PATH = None
+    _DUCKDB_AVAILABLE = False
+    logging.warning("DuckDB helper unavailable: %s", e)
+
 class DB:
-    """Tiny helper around DuckDB. App works if DuckDB is missing (falls back to CSV files)."""
+    """Tiny helper around the shared DuckDB connection from db.duckdb_helper."""
     con = None
     enabled = False
     db_path = None
 
     @classmethod
     def init(cls):
-        db_path = os.environ.get("DUCKDB_PATH", str(Path("data") / "backroom.duckdb"))
-        cls.db_path = db_path
-        if duckdb is None:
+        if not _DUCKDB_AVAILABLE:
+            cls.con = None
+            cls.enabled = False
+            cls.db_path = None
             return
+
         try:
-            # Ensure parent dir exists
-            Path(db_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-            cls.con = duckdb.connect(db_path)
+            cls.con = get_connection()
+            cls.db_path = _DB_PATH
             cls.enabled = True
-            # Create tables if not exists
+            # Ensure required tables exist (inventory, shelf_gaps, chat_logs).
             cls.con.execute("""
                 CREATE TABLE IF NOT EXISTS inventory (
                     sku TEXT,
@@ -133,17 +137,16 @@ class DB:
                 );
             """)
         except Exception as e:
-            # Log, but do not break the app
             logging.exception("DuckDB initialization failed: %s", e)
             cls.con = None
             cls.enabled = False
+            cls.db_path = None
 
     @classmethod
     def upsert_inventory_df(cls, df: pd.DataFrame):
         """Create/replace inventory table from a cleaned dataframe."""
         if not cls.enabled or df is None or df.empty:
             return
-        # Register DF then replace table
         cls.con.register("df_inv", df)
         cls.con.execute("CREATE OR REPLACE TABLE inventory AS SELECT * FROM df_inv;")
         cls.con.unregister("df_inv")
