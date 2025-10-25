@@ -36,7 +36,7 @@ from __future__ import annotations
 # --- Standard libs ---
 import os
 import re
-
+import logging
 from pathlib import Path
 from typing import Annotated, TypedDict, List
 
@@ -44,20 +44,25 @@ from typing import Annotated, TypedDict, List
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
-
+import numpy as np
 
 # --- LangGraph ---
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 # --- Project utils (user-provided) ---
-from src.utils import ensure_dirs, get_data_paths
+from src.utils import ensure_dirs, get_data_paths, logger
 from src.cleaning import clean_inventory_df, save_cleaned_inventory
 from src.forecast import compute_reorder_plan
 from src.detect import detect_shelf_gaps
 
 # ------ Project tools (reused in agent) ------
-from src.tools import tool_load_inventory, tool_lookup_sku, tool_reorder_plan
+from src.tools import (
+    tool_load_inventory,
+    tool_lookup_sku,
+    tool_reorder_plan,
+    tool_detect_gap,   # <-- added
+)
 
 # =============================
 # Streamlit App Configuration
@@ -264,6 +269,15 @@ if page == "Chat":
                     ctx_msgs.append({"role": "system", "content": tool_lookup_sku(sku_id, DATA_PROCESSED)})
                 except Exception as e:
                     ctx_msgs.append({"role": "system", "content": f"Lookup error for SKU {sku_id}: {e}"})
+
+            # gap detection intent: e.g., "gap detect image.jpg"
+            g = re.search(r"\bgap\s*(?:detect|detection)\s+(.+)$", prompt, flags=re.IGNORECASE)
+            if g:
+                image_path = g.group(1).strip().strip('"\'')
+                try:
+                    ctx_msgs.append({"role": "system", "content": tool_detect_gap(image_path)})
+                except Exception as e:
+                    ctx_msgs.append({"role": "system", "content": f"Gap detect error for {image_path}: {e}"})
 
             # reorder plan intent (only if not a specific SKU request)
             if any(k in lower_q for k in ["reorder plan", "reorder", "restock plan", "restock"]) and not m:
