@@ -36,7 +36,7 @@ from __future__ import annotations
 # --- Standard libs ---
 import os
 import re
-import logging
+
 from pathlib import Path
 from typing import Annotated, TypedDict, List
 
@@ -44,20 +44,20 @@ from typing import Annotated, TypedDict, List
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
-import numpy as np
+
 
 # --- LangGraph ---
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 # --- Project utils (user-provided) ---
-from src.utils import ensure_dirs, get_data_paths, logger
+from src.utils import ensure_dirs, get_data_paths
 from src.cleaning import clean_inventory_df, save_cleaned_inventory
 from src.forecast import compute_reorder_plan
 from src.detect import detect_shelf_gaps
 
 # ------ Project tools (reused in agent) ------
-from src.tools import tool_load_inventory, tool_lookup_sku, tool_reorder_plan, tool_detect_gap
+from src.tools import tool_load_inventory, tool_lookup_sku, tool_reorder_plan
 
 # =============================
 # Streamlit App Configuration
