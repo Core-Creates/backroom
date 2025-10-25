@@ -57,7 +57,7 @@ from src.forecast import compute_reorder_plan
 from src.detect import detect_shelf_gaps
 
 # ------ Project tools (reused in agent) ------
-from src.tools import tool_load_inventory, tool_lookup_sku, tool_reorder_plan
+from src.tools import tool_load_inventory, tool_lookup_sku, tool_reorder_plan, tool_detect_gap
 
 # =============================
 # Streamlit App Configuration
