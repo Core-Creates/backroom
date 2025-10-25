@@ -101,11 +101,13 @@ def clean_inventory_df(
     df["days_of_cover"] = np.maximum(days, 0)
 
     # Restock signal — produce Python bools (not numpy.bool_)    
-    df["restock_needed"] = (
-    ((df["shelf_units"] < shelf_low_threshold) & (df["backroom_units"] > 0))
-    .astype(object)
-    .map(bool)
-)
+    # Restock signal — ensure Python bool scalars with object dtype
+    mask = (df["shelf_units"] < shelf_low_threshold) & (df["backroom_units"] > 0)
+    df["restock_needed"] = pd.Series(
+    [True if bool(v) else False for v in mask.tolist()],
+    index=df.index,
+    dtype="object",
+    )
 
 
     # Optional safety_stock default (used later in forecasting)
