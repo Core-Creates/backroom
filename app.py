@@ -185,7 +185,7 @@ with st.sidebar:
         st.info("DuckDB: OFF (using CSV files only)")
     page = st.radio(
         "Navigation",
-        ["Overview", "Upload & Clean", "Forecast", "Shelf Gaps (Vision)", "Chat"],
+        ["Overview", "Upload & Clean", "Forecast", "Shelf Gaps (Vision)", "Chat", "Admin (DB Browser)"],
     )
 
 # =============================
@@ -284,6 +284,71 @@ elif page == "Shelf Gaps (Vision)":
                     st.warning(f"Could not persist shelf gap for {f.name}: {e}")
 
         st.dataframe(pd.DataFrame(results), use_container_width=True)
+
+
+elif page == "Admin (DB Browser)":
+    st.subheader("🗄️ Admin — Browse DuckDB Tables")
+    if not DB.enabled:
+        st.info("DuckDB is OFF. Set DUCKDB_PATH and restart to enable the DB browser.")
+    else:
+        # ---- Inventory browser ----
+        st.markdown("### Inventory")
+        inv = DB.read_inventory_df()
+        if inv is None or inv.empty:
+            st.caption("No rows in `inventory`. Upload & Clean to populate.")
+        else:
+            # simple search on SKU or product_name
+            c1, c2 = st.columns([2,1])
+            with c1:
+                q = st.text_input("Search (SKU or Product)", placeholder="e.g., SKU-123 or shampoo")
+            with c2:
+                top_n = st.number_input("Max rows", 50, 5000, 500, step=50)
+            df_view = inv
+            if q:
+                q_lower = q.lower()
+                mask = inv["sku"].astype(str).str.lower().str.contains(q_lower) | inv["product_name"].astype(str).str.lower().str.contains(q_lower)
+                df_view = inv[mask]
+            st.dataframe(df_view.head(int(top_n)), use_container_width=True)
+            st.download_button(
+                "⬇️ Download inventory (CSV)",
+                data=df_view.to_csv(index=False).encode("utf-8"),
+                file_name="inventory_admin_export.csv",
+                mime="text/csv"
+            )
+
+        st.markdown("---")
+
+        # ---- Chat logs browser ----
+        st.markdown("### Chat Logs")
+        try:
+            chat_df = DB.con.execute("SELECT * FROM chat_logs ORDER BY created_at DESC").fetch_df()
+        except Exception as e:
+            chat_df = None
+            st.warning(f"Could not read chat_logs: {e}")
+
+        if chat_df is None or chat_df.empty:
+            st.caption("No chat logs yet. Talk to the assistant in the Chat tab.")
+        else:
+            c1, c2, c3 = st.columns([2,1,1])
+            with c1:
+                role_filter = st.multiselect("Role filter", options=sorted(chat_df["role"].dropna().unique().tolist()), default=[])
+            with c2:
+                top_n_chat = st.number_input("Max rows", 50, 5000, 500, step=50, key="chat_max_rows")
+            with c3:
+                search_chat = st.text_input("Search text", placeholder="keywords in content", key="chat_search")
+            df_chat_view = chat_df
+            if role_filter:
+                df_chat_view = df_chat_view[df_chat_view["role"].isin(role_filter)]
+            if search_chat:
+                s = search_chat.lower()
+                df_chat_view = df_chat_view[df_chat_view["content"].astype(str).str.lower().str.contains(s)]
+            st.dataframe(df_chat_view.head(int(top_n_chat)), use_container_width=True)
+            st.download_button(
+                "⬇️ Download chat logs (CSV)",
+                data=df_chat_view.to_csv(index=False).encode("utf-8"),
+                file_name="chat_logs_admin_export.csv",
+                mime="text/csv"
+            )
 
 # =============================
 # Page 5: Guarded Chat (LangGraph)
