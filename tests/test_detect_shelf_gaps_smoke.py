@@ -10,7 +10,7 @@ def test_detect_shelf_gaps_smoke(tmp_path: Path):
     rng = np.random.default_rng(0)
     base[:, 100:140] = rng.integers(150, 255, size=(h, 40), dtype=np.uint8)
     p = tmp_path / "shelf.png"
-    Image.fromarray(base, mode="L").save(p)
+    Image.fromarray(base).convert("L").save(p)
 
     # Local mode should report some uniform tiles
     res_local = detect_shelf_gaps(p, mode="local", tile=40, uniform_thresh=800.0)
