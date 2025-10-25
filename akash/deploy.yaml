@@ -1,0 +1,35 @@
+version: "2.0"
+services:
+  backroom:
+    image: ghcr.io/<your-user>/backroom:latest
+    env:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - STREAMLIT_SERVER_PORT=8501
+    expose:
+      - port: 8501
+        as: 80
+        to:
+          - global: true
+profiles:
+  compute:
+    backroom:
+      resources:
+        cpu:
+          units: "0.5"
+        memory:
+          size: "1Gi"
+        storage:
+          size: "2Gi"
+  placement:
+    default:
+      pricing:
+        backroom:
+          denom: uakt
+          amount: 1000
+deployment:
+  backroom:
+    default:
+      profile: backroom
+      count: 1
+      strategy:
+        type: "Random"
