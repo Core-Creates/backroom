@@ -155,11 +155,11 @@ def _derive_missing_columns(df: pd.DataFrame, missing: list) -> pd.DataFrame:
 
     # Ensure SKU string formatting for any derivations that depend on it
     if "sku" in df.columns:
-        df["sku"] = df["sku"].astype(str).strip()
+        df["sku"] = df["sku"].astype(str).str.strip()
 
     # product_name ← sku (fallback)
     if "product_name" in missing and "sku" in df.columns:
-        df["product_name"] = df["sku"].astype(str)
+        df["product_name"] = df["sku"].astype(str).str.strip()
         logger.info("Derived product_name from sku")
 
     # backroom/shelf defaults
@@ -171,48 +171,46 @@ def _derive_missing_columns(df: pd.DataFrame, missing: list) -> pd.DataFrame:
         logger.info("Defaulted shelf_units=0")
 
     # on_hand ← backroom + shelf (if either was missing, they now exist)
-    if "on_hand" in missing:
-        if {"backroom_units", "shelf_units"}.issubset(df.columns):
-            df["on_hand"] = df["backroom_units"].fillna(0) + df["shelf_units"].fillna(0)
-            logger.info("Derived on_hand from backroom_units + shelf_units")
+    if "on_hand" in missing and {"backroom_units", "shelf_units"}.issubset(df.columns):
+        df["on_hand"] = df["backroom_units"].fillna(0) + df["shelf_units"].fillna(0)
+        logger.info("Derived on_hand from backroom_units + shelf_units")
 
     # avg_daily_sales derivation
     if "avg_daily_sales" in missing:
         if "sold_qty" in df.columns:
+            # Ensure numeric sold_qty for rolling
+            df["sold_qty"] = pd.to_numeric(df["sold_qty"], errors="coerce").fillna(0)
+
             # Choose an ordering column: prefer 'date', else 'd' (e.g., M5 day index), else group order
             order_col = None
             if "date" in df.columns:
-                # Parse date if needed
                 if not np.issubdtype(df["date"].dtype, np.datetime64):
                     df["date"] = pd.to_datetime(df["date"], errors="coerce")
                 order_col = "date"
             elif "d" in df.columns:
                 order_col = "d"
 
-            # We need a key to group on; assume sku exists per schema
             key = "sku" if "sku" in df.columns else None
-
             if key:
                 if order_col:
                     df = df.sort_values([key, order_col])
                 else:
                     df = df.sort_values([key])
 
-                # Rolling 7-day (or 7-row if no date/d) mean per SKU
                 df["avg_daily_sales"] = (
                     df.groupby(key, group_keys=False)["sold_qty"]
                       .rolling(ROLLING_WINDOW_DAYS, min_periods=1)
                       .mean()
                       .reset_index(level=0, drop=True)
                 )
-                logger.info(f"Derived avg_daily_sales from sold_qty with a {ROLLING_WINDOW_DAYS}-row rolling mean"
-                            f"{' using ' + order_col if order_col else ' (group order)'}")
+                logger.info(
+                    f"Derived avg_daily_sales from sold_qty with a {ROLLING_WINDOW_DAYS}-row rolling mean"
+                    f"{' using ' + order_col if order_col else ' (group order)'}"
+                )
             else:
-                # Fallback: global mean if no key (shouldn't happen with REQUIRED sku)
-                df["avg_daily_sales"] = float(pd.to_numeric(df["sold_qty"], errors="coerce").fillna(0).mean())
+                df["avg_daily_sales"] = float(df["sold_qty"].mean())
                 logger.warning("Derived avg_daily_sales using global mean (no SKU key found)")
         else:
-            # If we cannot compute from sales, default to zero (keeps pipeline running)
             df["avg_daily_sales"] = 0.0
             logger.warning("avg_daily_sales defaulted to 0.0 (sold_qty not available)")
 
