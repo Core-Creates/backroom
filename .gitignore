@@ -239,3 +239,4 @@ mlruns/
 .vscode/
 
 m5_forecasting_accuracy/
+/node_modules
