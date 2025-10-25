@@ -55,6 +55,18 @@ feat = ["lag_7","lag_28","rmean_7","rmean_28","sell_price",
 
 df = df.dropna(subset=feat+["sales"]).copy()
 
+# After df = df.dropna(...).copy()
+# SCALE KNOB(s):
+MAX_ITEMS = 50   # try 50 → 200 → None (all in dept)
+MAX_STORES = 1   # later: set to None to include all stores in this dept
+
+stores = df["store_id"].unique()[:MAX_STORES] if MAX_STORES else df["store_id"].unique()
+df = df[df["store_id"].isin(stores)]
+
+if MAX_ITEMS:
+    items = df["item_id"].unique()[:MAX_ITEMS]
+    df = df[df["item_id"].isin(items)]
+
 # Reduce to 50 items for speed
 items = df["item_id"].unique()[:50]
 df = df[df["item_id"].isin(items)].copy()
