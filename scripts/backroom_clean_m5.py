@@ -9,6 +9,8 @@ Purpose:
   checks ranges, and emits:
     1) m5_clean_long.csv  row per (store_id, item_id, date)
     2) dq_report.md  human-readable data quality report
+    3) (optional) Parquet export: single file or partitioned
+    4) (optional) sample CSV with first N rows
 
 Inputs Supported (any combo):
    --m5-zip path/to/m5-forecasting-accuracy.zip  (official Kaggle bundle)
@@ -22,7 +24,7 @@ import os
 import re
 import zipfile
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 import pandas as pd
 
@@ -174,6 +176,83 @@ def build_report(stats: CleanStats, nulls_by_col: Dict[str, int], notes: str) ->
     print(notes, file=s)
     return s.getvalue()
 
+# ---- Parquet helpers (single-file or partitioned) ----
+def write_parquet_with_fallback(
+    out_csv: str,
+    parquet_path: str,
+    partition_by: Optional[List[str]] = None
+) -> None:
+    """
+    Try pandas.to_parquet first (pyarrow/fastparquet). If unavailable, fallback to DuckDB.
+    If `partition_by` is provided, `parquet_path` is treated as a directory output.
+    """
+    # Attempt pandas first (single-file only if no partitioning)
+    if partition_by in (None, [], ()):
+        try:
+            import pyarrow  # noqa: F401
+            import pandas as pd
+            df = pd.read_csv(out_csv, low_memory=False)
+            df.to_parquet(parquet_path, index=False)
+            print(f"Parquet saved (pandas): {parquet_path}")
+            return
+        except Exception as e:
+            print(f"pandas.to_parquet not used ({e}); falling back to DuckDB...")
+    else:
+        print("Partitioned export requested; using DuckDB backend.")
+
+    # DuckDB fallback (handles both single-file and partitioned)
+    try:
+        import duckdb
+    except ImportError:
+        raise RuntimeError(
+            "Parquet export requested but neither pyarrow/fastparquet nor duckdb is available. "
+            "Install one of: pip install pyarrow OR pip install duckdb"
+        )
+    con = duckdb.connect()
+    if partition_by:
+        # directory output
+        os.makedirs(parquet_path, exist_ok=True)
+        cols = ", ".join(partition_by)
+        con.execute(f"""
+        COPY (
+          SELECT *
+          FROM read_csv_auto('{out_csv}', SAMPLE_SIZE=-1)
+        ) TO '{parquet_path.replace("'", "''")}'
+        (FORMAT PARQUET, PARTITION_BY ({cols}));
+        """)
+        print(f"Partitioned Parquet written to {parquet_path} (by {', '.join(partition_by)})")
+    else:
+        con.execute(f"""
+        COPY (
+          SELECT *
+          FROM read_csv_auto('{out_csv}', SAMPLE_SIZE=-1)
+        ) TO '{parquet_path.replace("'", "''")}'
+        (FORMAT PARQUET);
+        """)
+        print(f"Parquet saved (duckdb): {parquet_path}")
+
+def write_sample_csv(out_csv: str, sample_path: str, n_rows: int) -> None:
+    try:
+        import duckdb
+        con = duckdb.connect()
+        con.execute(f"""
+        COPY (
+          SELECT *
+          FROM read_csv_auto('{out_csv}', SAMPLE_SIZE=-1)
+          LIMIT {int(n_rows)}
+        ) TO '{sample_path.replace("'", "''")}' (HEADER, DELIMITER ',');
+        """)
+        print(f"Sample CSV written: {sample_path}")
+    except Exception as e:
+        # Pandas streaming fallback
+        import pandas as pd  # type: ignore
+        import itertools
+        chunksize = min(max(10_000, n_rows), 250_000)
+        it = pd.read_csv(out_csv, chunksize=chunksize)
+        out = pd.concat(list(itertools.islice(it, max(1, n_rows // chunksize + (1 if n_rows % chunksize else 0)))))
+        out.iloc[:n_rows].to_csv(sample_path, index=False)
+        print(f"Sample CSV written (pandas fallback): {sample_path}")
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Clean the M5 Forecasting dataset into a tidy long table.")
     ap.add_argument("--m5-zip", dest="m5_zip", help="Path to m5-forecasting-accuracy.zip")
@@ -181,8 +260,14 @@ def main(argv=None) -> int:
     ap.add_argument("--calendar-csv", dest="calendar_csv", help="Path to calendar.csv")
     ap.add_argument("--prices-csv", dest="prices_csv", help="Path to sell_prices.csv")
     ap.add_argument("--out-dir", dest="out_dir", required=True, help="Directory to write outputs")
-    args = ap.parse_args(argv)
 
+    # New post-processing flags
+    ap.add_argument("--to-parquet", action="store_true", help="Also write a Parquet version of the cleaned CSV")
+    ap.add_argument("--parquet-path", default=None, help="Path for Parquet output (file or directory if partitioned)")
+    ap.add_argument("--partition-by", default="", help="Comma-separated columns for partitioned Parquet (e.g. state_id,store_id)")
+    ap.add_argument("--sample-csv", type=int, default=0, help="Write a sample CSV with the first N rows")
+
+    args = ap.parse_args(argv)
     os.makedirs(args.out_dir, exist_ok=True)
 
     sales_wide, calendar, prices = load_m5(
@@ -238,6 +323,23 @@ def main(argv=None) -> int:
     print(f"Duplicates removed: {stats.duplicates_removed}")
     print(f"Report: {out_report}")
     print(f"Clean CSV: {out_csv}")
+
+    # ---- Post-processing ----
+    # Parquet export
+    if args.to_parquet:
+        parquet_path = args.parquet_path
+        if not parquet_path:
+            # default: single-file parquet next to CSV; if partitioning, write to a folder
+            parquet_path = os.path.join(args.out_dir, "m5_clean_long.parquet") if not args.partition_by \
+                           else os.path.join(args.out_dir, "m5_parquet")
+        partition_cols = [c.strip() for c in args.partition_by.split(",") if c.strip()]
+        write_parquet_with_fallback(out_csv, parquet_path, partition_cols if partition_cols else None)
+
+    # Sample CSV
+    if args.sample_csv and args.sample_csv > 0:
+        sample_path = os.path.join(args.out_dir, f"sample_{args.sample_csv}.csv")
+        write_sample_csv(out_csv, sample_path, args.sample_csv)
+
     return 0
 
 if __name__ == "__main__":
