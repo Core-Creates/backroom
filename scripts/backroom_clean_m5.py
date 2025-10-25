@@ -177,6 +177,35 @@ def build_report(stats: CleanStats, nulls_by_col: Dict[str, int], notes: str) ->
     return s.getvalue()
 
 # ---- Parquet helpers (single-file or partitioned) ----
+def write_duckdb(out_csv: str, db_path: str, table_name: str = "m5_clean_long") -> None:
+    """
+    Create (or open) a DuckDB database and load the cleaned CSV into a table.
+    Overwrites the table if it already exists.
+    """
+    try:
+        import duckdb
+    except ImportError as e:
+        raise RuntimeError(
+            "DuckDB export requested but duckdb is not installed. "
+            "Install with: pip install duckdb"
+        ) from e
+
+    con = duckdb.connect(db_path)
+    # Create or replace the table using DuckDB's zero-copy CSV reader
+    con.execute(f"DROP TABLE IF EXISTS {duckdb.escape_identifier(table_name)};")
+    con.execute(f"""
+        CREATE TABLE {duckdb.escape_identifier(table_name)} AS
+        SELECT * FROM read_csv_auto('{out_csv}', SAMPLE_SIZE=-1);
+    """)
+    # Optional: add a few handy indexes (comment out if not needed)
+    for col in ["state_id", "store_id", "item_id", "date", "wm_yr_wk"]:
+        try:
+            con.execute(f"CREATE INDEX IF NOT EXISTS idx_{col} ON {duckdb.escape_identifier(table_name)}({duckdb.escape_identifier(col)});")
+        except Exception:
+            pass
+    con.close()
+    print(f"DuckDB written: {db_path} (table={table_name})")
+
 def write_parquet_with_fallback(
     out_csv: str,
     parquet_path: str,
@@ -266,7 +295,15 @@ def main(argv=None) -> int:
     ap.add_argument("--parquet-path", default=None, help="Path for Parquet output (file or directory if partitioned)")
     ap.add_argument("--partition-by", default="", help="Comma-separated columns for partitioned Parquet (e.g. state_id,store_id)")
     ap.add_argument("--sample-csv", type=int, default=0, help="Write a sample CSV with the first N rows")
-
+    
+    # DuckDB export flags
+    ap.add_argument("--to-duckdb", action="store_true",
+                    help="Also write a DuckDB database with the cleaned table preloaded")
+    ap.add_argument("--duckdb-path", default=None,
+                    help="Path to the .duckdb database file (default: <out_dir>/m5.duckdb)")
+    ap.add_argument("--duckdb-table", default="m5_clean_long",
+                    help="Table name to create/replace in DuckDB (default: m5_clean_long)")
+    
     args = ap.parse_args(argv)
     os.makedirs(args.out_dir, exist_ok=True)
 
