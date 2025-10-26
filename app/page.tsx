@@ -1,16 +1,21 @@
 'use client'
-
-import { useState, useEffect, useRef } from 'react'
-import { ChevronDownIcon } from 'lucide-react'
+// app/page.tsx
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { ChevronDownIcon, RotateCw } from 'lucide-react'
 import { InventoryDashboard } from '@/components/InventoryDashboard'
 import { UploadSection } from '@/components/UploadSection'
 import { ForecastSection } from '@/components/ForecastSection'
 import { ChatInterface } from '@/components/ChatInterface'
+import { apiGet } from '@/lib/api'
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '(unset)'
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'upload' | 'forecast' | 'chat'>('overview')
   const [selectedCategory, setSelectedCategory] = useState('All Categories')
   const [isDropdownOpen, setIsDropdownOpen] = useState(false)
+  const [apiOk, setApiOk] = useState<'unknown' | 'ok' | 'down'>('unknown')
+  const [checking, setChecking] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const tabs = [
@@ -18,7 +23,7 @@ export default function Home() {
     { id: 'upload', label: 'Upload & Clean', icon: '📤' },
     { id: 'forecast', label: 'Forecast', icon: '🔮' },
     { id: 'chat', label: 'AI Chat', icon: '💬' },
-  ]
+  ] as const
 
   const groceryCategories = [
     'All Categories',
@@ -35,7 +40,7 @@ export default function Home() {
     'Baby & Kids',
     'Pet Supplies',
     'Organic & Natural',
-    'International Foods'
+    'International Foods',
   ]
 
   // Close dropdown when clicking outside
@@ -45,12 +50,26 @@ export default function Home() {
         setIsDropdownOpen(false)
       }
     }
-
     document.addEventListener('mousedown', handleClickOutside)
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Check backend health (FastAPI /health)
+  const checkHealth = useCallback(async () => {
+    setChecking(true)
+    try {
+      await apiGet<{ status: string }>('/health')
+      setApiOk('ok')
+    } catch {
+      setApiOk('down')
+    } finally {
+      setChecking(false)
     }
   }, [])
+
+  useEffect(() => {
+    checkHealth()
+  }, [checkHealth])
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -69,7 +88,7 @@ export default function Home() {
                   <span>{selectedCategory}</span>
                   <ChevronDownIcon className="h-4 w-4" />
                 </button>
-                
+
                 {isDropdownOpen && (
                   <div className="absolute z-10 mt-1 w-56 bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none">
                     {groceryCategories.map((category) => (
@@ -89,12 +108,50 @@ export default function Home() {
                   </div>
                 )}
               </div>
-              
-              <h1 className="text-2xl font-bold text-gray-900">
-                Backroom — Inventory Intelligence
-              </h1>
+
+              <h1 className="text-2xl font-bold text-gray-900">Backroom — Inventory Intelligence</h1>
             </div>
-            <div className="flex items-center space-x-4">
+
+            {/* Right badges */}
+            <div className="flex items-center space-x-3">
+              {/* API status */}
+              {apiOk === 'ok' && (
+                <span
+                  title={`Backend: ${API_BASE}`}
+                  className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800"
+                >
+                  API Connected
+                </span>
+              )}
+              {apiOk === 'down' && (
+                <span
+                  title={`Backend: ${API_BASE}`}
+                  className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800"
+                >
+                  API Down
+                </span>
+              )}
+              {apiOk === 'unknown' && (
+                <span
+                  title={`Backend: ${API_BASE}`}
+                  className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800"
+                >
+                  Checking API…
+                </span>
+              )}
+
+              {/* Retry health check */}
+              <button
+                onClick={checkHealth}
+                disabled={checking}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                title="Re-check API health"
+              >
+                <RotateCw className={`h-3.5 w-3.5 ${checking ? 'animate-spin' : ''}`} />
+                Retry
+              </button>
+
+              {/* Existing DuckDB badge (kept) */}
               <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
                 DuckDB Connected
               </span>
