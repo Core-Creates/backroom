@@ -1,0 +1,61 @@
+---
+version: "2.0"
+
+services:
+  streamlit:
+    # Replace with your actual Docker image from Docker Hub or GHCR
+    # Example: yourusername/backroom-app:latest
+    image: cyberkirtan/backroom-app:latest
+    
+    # Environment variables
+    env:
+      # Add your API key here 
+      - AKASH_API_KEY=sk-uJyxDLSFHEKfAC8Wi8GoNw
+    
+    # Expose Streamlit port
+    expose:
+      - port: 8501
+        as: 80
+        to:
+          - global: true
+        proto: tcp
+        accept:
+          - streamlit.yourdomain.com  # Optional: specify your domain
+    
+    # Resource requirements
+    resources:
+      cpu:
+        units: 0.5
+      memory:
+        size: 512Mi
+      storage:
+        size: 1Gi
+
+profiles:
+  compute:
+    streamlit:
+      resources:
+        cpu:
+          units: 0.5
+        memory:
+          size: 512Mi
+        storage:
+          size: 1Gi
+  
+  placement:
+    akash:
+      attributes:
+        host: akash
+      signedBy:
+        anyOf:
+          - "akash1365yvmc4s7awdyj3n2sav7xfx76adc6dnmlx63"
+      pricing:
+        streamlit:
+          denom: uakt
+          amount: 1000
+
+deployment:
+  streamlit:
+    akash:
+      profile: streamlit
+      count: 1
