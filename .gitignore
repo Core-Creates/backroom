@@ -207,19 +207,17 @@ marimo/_lsp/
 __marimo__/
 # Data & outputs
 out/
-data/**/*.parquet
 data/**/*.csv
-*.parquet
+
 *.feather
 *.arrow
-*.duckdb
+
+outputs_grocery/
 
 .DS_Store
 Thumbs.db
 out/
 *.csv
-*.parquet
-*.duckdb
 
 m5_out/
 
@@ -234,3 +232,6 @@ mlruns/
 
 m5_forecasting_accuracy/
 /node_modules
+
+# Next.js build output
+.next/
