@@ -1,0 +1,10 @@
+langgraph>=0.2.0
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-core>=0.1.0
+duckdb>=0.8.0
+pandas>=1.5.0
+python-dotenv>=1.0.0
+streamlit>=1.28.0
+matplotlib>=3.5.0
+seaborn>=0.11.0

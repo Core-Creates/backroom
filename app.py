@@ -1,6 +1,4 @@
-
-"""
-Backroom — Inventory Intelligence + Chatbot (Streamlit + LangGraph + DuckDB)
+""" Backroom — Inventory Intelligence + Chatbot (Streamlit + LangGraph + DuckDB) 
 ----------------------------------------------------------------------------
 Single-file Streamlit app that provides:
 1) Inventory workflow (overview → upload/clean → reorder forecast → shelf-gaps demo)
@@ -13,7 +11,7 @@ Single-file Streamlit app that provides:
 Run locally
 ----------
 # 1) Install deps
-pip install -U streamlit langgraph openai typing_extensions pydantic pandas numpy duckdb pillow
+pip install -U streamlit langgraph openai typing_extensions pydantic pandas numpy duckdb pillow pyarrow
 
 # 2) Your project utilities (expected in ./src)
 #    src/utils.py     -> ensure_dirs, get_data_paths, logger
@@ -49,20 +47,14 @@ from typing import Annotated, TypedDict, List
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
-import numpy as np
 
-# --- NEW: DuckDB (optional persistence) ---
-try:
-    import duckdb  # type: ignore
-except Exception as _duckdb_import_err:
-    duckdb = None  # graceful fallback without persistence
 
 # --- LangGraph ---
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 # --- Project utils (user-provided) ---
-from src.utils import ensure_dirs, get_data_paths, logger
+from src.utils import ensure_dirs, get_data_paths
 from src.cleaning import clean_inventory_df, save_cleaned_inventory
 from src.forecast import compute_reorder_plan
 from src.detect import detect_shelf_gaps
@@ -86,26 +78,37 @@ ensure_dirs()
 DATA_RAW, DATA_PROCESSED, SHELVES = get_data_paths()
 
 # =============================
-# NEW: DuckDB helper (optional)
+# DuckDB helper (uses Python module, not JS)
 # =============================
+# Use centralized Python helper (db/duckdb_helper.py) instead of any JS files.
+try:
+    from db.duckdb_helper import get_connection, db_path as _DB_PATH
+    _DUCKDB_AVAILABLE = True
+except Exception as e:
+    get_connection = None  # type: ignore
+    _DB_PATH = None
+    _DUCKDB_AVAILABLE = False
+    logging.warning("DuckDB helper unavailable: %s", e)
+
 class DB:
-    """Tiny helper around DuckDB. App works if DuckDB is missing (falls back to CSV files)."""
+    """Tiny helper around the shared DuckDB connection from db.duckdb_helper."""
     con = None
     enabled = False
     db_path = None
 
     @classmethod
     def init(cls):
-        db_path = os.environ.get("DUCKDB_PATH", str(Path("data") / "backroom.duckdb"))
-        cls.db_path = db_path
-        if duckdb is None:
+        if not _DUCKDB_AVAILABLE:
+            cls.con = None
+            cls.enabled = False
+            cls.db_path = None
             return
+
         try:
-            # Ensure parent dir exists
-            Path(db_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-            cls.con = duckdb.connect(db_path)
+            cls.con = get_connection()
+            cls.db_path = _DB_PATH
             cls.enabled = True
-            # Create tables if not exists
+            # Ensure required tables exist (inventory, shelf_gaps, chat_logs).
             cls.con.execute("""
                 CREATE TABLE IF NOT EXISTS inventory (
                     sku TEXT,
@@ -133,17 +136,16 @@ class DB:
                 );
             """)
         except Exception as e:
-            # Log, but do not break the app
             logging.exception("DuckDB initialization failed: %s", e)
             cls.con = None
             cls.enabled = False
+            cls.db_path = None
 
     @classmethod
     def upsert_inventory_df(cls, df: pd.DataFrame):
         """Create/replace inventory table from a cleaned dataframe."""
         if not cls.enabled or df is None or df.empty:
             return
-        # Register DF then replace table
         cls.con.register("df_inv", df)
         cls.con.execute("CREATE OR REPLACE TABLE inventory AS SELECT * FROM df_inv;")
         cls.con.unregister("df_inv")
@@ -185,7 +187,15 @@ with st.sidebar:
         st.info("DuckDB: OFF (using CSV files only)")
     page = st.radio(
         "Navigation",
-        ["Overview", "Upload & Clean", "Forecast", "Shelf Gaps (Vision)", "Chat", "Admin (DB Browser)"],
+        [
+            "Overview",
+            "Upload & Clean",
+            "Forecast",
+            "Shelf Gaps (Vision)",
+            "Chat",
+            "Admin (DB Browser)",
+            "Dev Chat (Direct Graph)",  # <-- NEW PAGE
+        ],
     )
 
 # =============================
@@ -193,15 +203,19 @@ with st.sidebar:
 # =============================
 if page == "Overview":
     st.subheader("Processed Inventory Snapshot")
-    processed_fp = DATA_PROCESSED / "inventory_clean.csv"
+    processed_fp_csv = DATA_PROCESSED / "inventory_clean.csv"
+    processed_fp_parq = DATA_PROCESSED / "inventory_clean.parquet"
 
-    # Prefer DuckDB when available, else fall back to CSV
+    # Prefer DuckDB when available, else fall back to local files
     df = None
     if DB.enabled:
         df = DB.read_inventory_df()
 
-    if df is None and processed_fp.exists():
-        df = pd.read_csv(processed_fp)
+    if df is None:
+        if processed_fp_parq.exists():
+            df = pd.read_parquet(processed_fp_parq)
+        elif processed_fp_csv.exists():
+            df = pd.read_csv(processed_fp_csv)
 
     if isinstance(df, pd.DataFrame) and not df.empty:
         c1, c2, c3 = st.columns(3)
@@ -211,28 +225,117 @@ if page == "Overview":
             st.metric("Total On-Hand", int(df.get("on_hand", pd.Series(dtype=float)).sum()))
         with c3:
             mean_ads = round(df.get("avg_daily_sales", pd.Series(dtype=float)).mean() or 0, 2)
-            st.metric("Avg Daily Sales (mean)", mean_ads)
-        st.dataframe(df.head(100), use_container_width=True)
+        st.metric("Avg Daily Sales (mean)", mean_ads)
+        st.dataframe(df.head(100), width='stretch')  # <- updated
     else:
         st.info("No processed inventory found yet. Go to 'Upload & Clean' to ingest data.")
 
 elif page == "Upload & Clean":
-    st.subheader("Upload Inventory CSV")
+    st.subheader("Upload Inventory CSV or Parquet")
     st.markdown(
-        "Upload a CSV with columns like: `sku, product_name, on_hand, backroom_units, shelf_units, avg_daily_sales, lead_time_days`"
+        "Upload a **CSV or Parquet** with columns like: "
+        "`sku, product_name, on_hand, backroom_units, shelf_units, avg_daily_sales, lead_time_days`"
     )
-    uploaded = st.file_uploader("inventory.csv", type=["csv"])
-    if uploaded is not None:
-        raw_fp = DATA_RAW / "inventory.csv"
-        raw_fp.write_bytes(uploaded.read())
-        st.success(f"Saved raw file → {raw_fp}")
-        df = pd.read_csv(raw_fp)
-        cleaned = clean_inventory_df(df)
-        out_fp = save_cleaned_inventory(cleaned, DATA_PROCESSED / "inventory_clean.csv")
-        st.success(f"Cleaned & saved → {out_fp}")
-        st.dataframe(cleaned.head(100), use_container_width=True)
 
-        # NEW: persist to DuckDB if available
+    mode = st.radio(
+        "Ingest mode",
+        ["Upload file", "Load from local path (advanced)"],
+        help=(
+            "Upload file: normal browser upload (original local path is not available).\n"
+            "Load from local path: reads directly from an absolute path on this machine."
+        )
+    )
+
+    df = None
+    source_label = None  # what we’ll show as the human-facing source path in messages
+
+    if mode == "Upload file":
+        uploaded = st.file_uploader("inventory.(csv|parquet)", type=["csv", "parquet"])
+        source_hint = st.text_input(
+            "Optional: Original source path to display (for your records only)",
+            placeholder=r"C:\Users\corri\Documents\GitHub\backroom\notebooks\sales.parquet"
+        )
+
+        if uploaded is not None:
+            raw_name = uploaded.name
+            raw_fp = DATA_RAW / raw_name
+            raw_bytes = uploaded.read()
+            raw_fp.write_bytes(raw_bytes)
+
+            # Try to display the user-provided source path; else show where we saved the upload
+            source_label = source_hint.strip() or str(raw_fp)
+            st.success(f"Saved raw file → {raw_fp}\nSource file (display) → {source_label}")
+
+            ext = raw_name.lower().rsplit(".", 1)[-1]
+            if ext == "parquet":
+                df = pd.read_parquet(raw_fp)
+            else:
+                df = pd.read_csv(raw_fp)
+
+    else:
+        # Load from an absolute path on the local filesystem
+        local_path = st.text_input(
+            "Absolute path to CSV or Parquet on this machine",
+            placeholder=r"C:\Users\corri\Documents\GitHub\backroom\notebooks\sales.parquet"
+        )
+        if st.button("Load file"):
+            try:
+                p = Path(local_path)
+                if not p.exists():
+                    st.error(f"Path not found: {p}")
+                else:
+                    source_label = str(p)
+                    st.success(f"Using local source → {source_label}")
+                    ext = p.suffix.lower().lstrip(".")
+                    if ext == "parquet":
+                        df = pd.read_parquet(p)
+                    else:
+                        df = pd.read_csv(p)
+                    # Also stash a copy into DATA_RAW to keep your current workflow consistent
+                    raw_fp = DATA_RAW / p.name
+                    raw_fp.write_bytes(p.read_bytes())
+                    st.info(f"Copied local file into raw area → {raw_fp}")
+            except Exception as e:
+                st.error(f"Failed to load local file: {e}")
+
+    # If we have a dataframe, continue with cleaning/saving/persisting
+    if df is not None:
+        cleaned = clean_inventory_df(df)
+
+        # Keep existing CSV path
+        out_csv = DATA_PROCESSED / "inventory_clean.csv"
+        out_fp = save_cleaned_inventory(cleaned, out_csv)
+
+        # Parquet filename mirrors the *input* basename (csv or parquet), with _clean suffix
+        # If we know the original filename from upload or local path, use that stem; else default.
+        try:
+            if mode == "Upload file" and 'uploaded' in locals() and uploaded is not None:
+                stem = Path(uploaded.name).stem
+            elif mode == "Load from local path" and 'local_path' in locals() and local_path:
+                stem = Path(local_path).stem
+            else:
+                stem = "inventory"
+        except Exception:
+            stem = "inventory"
+
+        out_parquet = DATA_PROCESSED / f"{stem}_clean.parquet"
+
+        # Save parquet
+        try:
+            cleaned.to_parquet(out_parquet, index=False)
+            # Show the human-facing “source file” label prominently
+            st.success(
+                "Clean complete ✅\n\n"
+                f"Source file → {source_label or '(unknown)'}\n\n"
+                f"Cleaned & saved (CSV) → {out_fp}\n\n"
+                f"Cleaned & saved (Parquet) → {out_parquet}"
+            )
+        except Exception as e:
+            st.warning(f"Parquet save skipped: {e}")
+
+        st.dataframe(cleaned.head(100), width='stretch')  # <- updated
+
+        # Persist to DuckDB if available
         if DB.enabled:
             try:
                 DB.upsert_inventory_df(cleaned)
@@ -240,21 +343,25 @@ elif page == "Upload & Clean":
             except Exception as e:
                 st.warning(f"DuckDB persistence skipped: {e}")
 
+
 elif page == "Forecast":
     st.subheader("Reorder Planning")
-    processed_fp = DATA_PROCESSED / "inventory_clean.csv"
+    processed_fp_csv = DATA_PROCESSED / "inventory_clean.csv"
+    processed_fp_parq = DATA_PROCESSED / "inventory_clean.parquet"
 
-    # Prefer DuckDB inventory
+    # Prefer DuckDB inventory, else local files
     df = DB.read_inventory_df() if DB.enabled else None
     if df is None:
-        if not processed_fp.exists():
-            st.warning("No processed data yet. Upload & clean first.")
+        if processed_fp_parq.exists():
+            df = pd.read_parquet(processed_fp_parq)
+        elif processed_fp_csv.exists():
+            df = pd.read_csv(processed_fp_csv)
         else:
-            df = pd.read_csv(processed_fp)
+            st.warning("No processed data yet. Upload & clean first.")
 
     if isinstance(df, pd.DataFrame):
         plan = compute_reorder_plan(df)
-        st.dataframe(plan, use_container_width=True)
+        st.dataframe(plan, width='stretch')  # <- updated
         csv = plan.to_csv(index=False).encode("utf-8")
         st.download_button("Download Reorder Plan CSV", data=csv, file_name="reorder_plan.csv")
 
@@ -283,8 +390,7 @@ elif page == "Shelf Gaps (Vision)":
                 except Exception as e:
                     st.warning(f"Could not persist shelf gap for {f.name}: {e}")
 
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
-
+        st.dataframe(pd.DataFrame(results), width='stretch')  # <- updated
 
 elif page == "Admin (DB Browser)":
     st.subheader("🗄️ Admin — Browse DuckDB Tables")
@@ -308,7 +414,7 @@ elif page == "Admin (DB Browser)":
                 q_lower = q.lower()
                 mask = inv["sku"].astype(str).str.lower().str.contains(q_lower) | inv["product_name"].astype(str).str.lower().str.contains(q_lower)
                 df_view = inv[mask]
-            st.dataframe(df_view.head(int(top_n)), use_container_width=True)
+            st.dataframe(df_view.head(int(top_n)), width='stretch')  # <- updated
             st.download_button(
                 "⬇️ Download inventory (CSV)",
                 data=df_view.to_csv(index=False).encode("utf-8"),
@@ -342,7 +448,7 @@ elif page == "Admin (DB Browser)":
             if search_chat:
                 s = search_chat.lower()
                 df_chat_view = df_chat_view[df_chat_view["content"].astype(str).str.lower().str.contains(s)]
-            st.dataframe(df_chat_view.head(int(top_n_chat)), use_container_width=True)
+            st.dataframe(df_chat_view.head(int(top_n_chat)), width='stretch')  # <- updated
             st.download_button(
                 "⬇️ Download chat logs (CSV)",
                 data=df_chat_view.to_csv(index=False).encode("utf-8"),
@@ -525,6 +631,66 @@ if page == "Chat":
             """
         )
 
+# =============================
+# Page 6: Dev Chat (Direct Graph) — NEW
+# =============================
+elif page == "Dev Chat (Direct Graph)":
+    st.subheader("💬 Dev Chat — Direct RetailDataQueryGraph")
+    # Import locally so the rest of the app runs even if this module isn't present
+    try:
+        from langchain_core.messages import HumanMessage, AIMessage
+        # Your project uses a src/ layout:
+        from src.retail_query_graph import RetailDataQueryGraph
+    except Exception as e:
+        st.error(f"Required chat deps missing: {e}")
+        st.stop()
+
+    # Separate session state from LangGraph Chat
+    if "dev_messages" not in st.session_state:
+        st.session_state.dev_messages = []
+    if "dev_query_system" not in st.session_state:
+        try:
+            st.session_state.dev_query_system = RetailDataQueryGraph()
+            st.success("Connected to retail database ✅")
+        except Exception as e:
+            st.error(f"Error connecting to database: {e}")
+            st.stop()
+
+    # Render history
+    for msg in st.session_state.dev_messages:
+        role = "user" if isinstance(msg, HumanMessage) else "assistant"
+        with st.chat_message(role):
+            st.write(msg.content)
+
+    # Input
+    prompt = st.chat_input("Ask a question about your retail data…")
+    if prompt:
+        user_msg = HumanMessage(content=prompt)
+        st.session_state.dev_messages.append(user_msg)
+        with st.chat_message("user"):
+            st.write(prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing and querying data…"):
+                try:
+                    updated = st.session_state.dev_query_system.chat(st.session_state.dev_messages)
+                    st.session_state.dev_messages = updated
+                    if updated and isinstance(updated[-1], AIMessage):
+                        st.write(updated[-1].content)
+                    else:
+                        st.error("No response generated")
+                except Exception as e:
+                    err = f"Error: {e}"
+                    st.error(err)
+                    st.session_state.dev_messages.append(AIMessage(content=f"❌ {err}"))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🗑️ Clear Dev Chat"):
+            st.session_state.dev_messages = []
+            st.rerun()
+    with c2:
+        st.caption("This page talks directly to the in-process graph (no API).")
 
 # =============================
 # --- End of File ---
