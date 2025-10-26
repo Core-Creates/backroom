@@ -6,6 +6,8 @@ import { InventoryDashboard } from '@/components/InventoryDashboard'
 import { UploadSection } from '@/components/UploadSection'
 import { ForecastSection } from '@/components/ForecastSection'
 import { ChatInterface } from '@/components/ChatInterface'
+import { ParquetUpload } from '@/components/ParquetUpload'
+import { QueryInterface } from '@/components/QueryInterface'
 
 // Lightweight apiGet helper: fetch wrapper used by this page to check backend health.
 // This avoids a hard dependency on '@/lib/api' which may not exist in some environments.
@@ -29,6 +31,8 @@ export default function Home() {
   const tabs = [
     { id: 'overview', label: 'Overview', icon: '📊' },
     { id: 'upload', label: 'Upload & Clean', icon: '📤' },
+    { id: 'parquet', label: 'Parquet Data', icon: '🗄️' },
+    { id: 'query', label: 'Query Graphs', icon: '🔍' },
     { id: 'forecast', label: 'Forecast', icon: '🔮' },
     { id: 'chat', label: 'AI Chat', icon: '💬' },
   ] as const
@@ -195,6 +199,8 @@ export default function Home() {
         <div className="px-4 py-6 sm:px-0">
           {activeTab === 'overview' && <InventoryDashboard />}
           {activeTab === 'upload' && <UploadSection />}
+          {activeTab === 'parquet' && <ParquetUpload />}
+          {activeTab === 'query' && <QueryInterface />}
           {activeTab === 'forecast' && <ForecastSection />}
           {activeTab === 'chat' && <ChatInterface />}
         </div>

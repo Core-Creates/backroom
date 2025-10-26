@@ -30,7 +30,8 @@ export function InventoryDashboard() {
   const fetchInventoryData = async () => {
     try {
       setLoading(true)
-      const response = await fetch('/api/inventory')
+      // Try to fetch real data first, fallback to mock data
+      const response = await fetch('/api/inventory/real')
       const data = await response.json()
       
       if (response.ok) {
