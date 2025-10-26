@@ -6,7 +6,15 @@ import { InventoryDashboard } from '@/components/InventoryDashboard'
 import { UploadSection } from '@/components/UploadSection'
 import { ForecastSection } from '@/components/ForecastSection'
 import { ChatInterface } from '@/components/ChatInterface'
-import { apiGet } from '@/lib/api'
+
+// Lightweight apiGet helper: fetch wrapper used by this page to check backend health.
+// This avoids a hard dependency on '@/lib/api' which may not exist in some environments.
+async function apiGet<T = any>(path: string): Promise<T> {
+  const base = process.env.NEXT_PUBLIC_API_URL ?? ''
+  const res = await fetch(`${base}${path}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error('Network response was not ok')
+  return res.json()
+}
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '(unset)'
 
