@@ -208,24 +208,16 @@ __marimo__/
 # Data & outputs
 out/
 data/**/*.csv
-<<<<<<< HEAD
-*.feather
-*.arrow
-=======
 
 *.feather
 *.arrow
 
->>>>>>> 1f7d3a8eb92199df980e0d6382866e1b200af709
+outputs_grocery/
 
 .DS_Store
 Thumbs.db
 out/
 *.csv
-<<<<<<< HEAD
-=======
-
->>>>>>> 1f7d3a8eb92199df980e0d6382866e1b200af709
 
 m5_out/
 

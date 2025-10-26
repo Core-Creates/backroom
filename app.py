@@ -47,14 +47,14 @@ from typing import Annotated, TypedDict, List
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
-import numpy as np
+
 
 # --- LangGraph ---
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 # --- Project utils (user-provided) ---
-from src.utils import ensure_dirs, get_data_paths, logger
+from src.utils import ensure_dirs, get_data_paths
 from src.cleaning import clean_inventory_df, save_cleaned_inventory
 from src.forecast import compute_reorder_plan
 from src.detect import detect_shelf_gaps
@@ -187,7 +187,15 @@ with st.sidebar:
         st.info("DuckDB: OFF (using CSV files only)")
     page = st.radio(
         "Navigation",
-        ["Overview", "Upload & Clean", "Forecast", "Shelf Gaps (Vision)", "Chat", "Admin (DB Browser)"],
+        [
+            "Overview",
+            "Upload & Clean",
+            "Forecast",
+            "Shelf Gaps (Vision)",
+            "Chat",
+            "Admin (DB Browser)",
+            "Dev Chat (Direct Graph)",  # <-- NEW PAGE
+        ],
     )
 
 # =============================
@@ -217,8 +225,8 @@ if page == "Overview":
             st.metric("Total On-Hand", int(df.get("on_hand", pd.Series(dtype=float)).sum()))
         with c3:
             mean_ads = round(df.get("avg_daily_sales", pd.Series(dtype=float)).mean() or 0, 2)
-            st.metric("Avg Daily Sales (mean)", mean_ads)
-        st.dataframe(df.head(100), use_container_width=True)
+        st.metric("Avg Daily Sales (mean)", mean_ads)
+        st.dataframe(df.head(100), width='stretch')  # <- updated
     else:
         st.info("No processed inventory found yet. Go to 'Upload & Clean' to ingest data.")
 
@@ -325,7 +333,7 @@ elif page == "Upload & Clean":
         except Exception as e:
             st.warning(f"Parquet save skipped: {e}")
 
-        st.dataframe(cleaned.head(100), use_container_width=True)
+        st.dataframe(cleaned.head(100), width='stretch')  # <- updated
 
         # Persist to DuckDB if available
         if DB.enabled:
@@ -353,7 +361,7 @@ elif page == "Forecast":
 
     if isinstance(df, pd.DataFrame):
         plan = compute_reorder_plan(df)
-        st.dataframe(plan, use_container_width=True)
+        st.dataframe(plan, width='stretch')  # <- updated
         csv = plan.to_csv(index=False).encode("utf-8")
         st.download_button("Download Reorder Plan CSV", data=csv, file_name="reorder_plan.csv")
 
@@ -382,7 +390,7 @@ elif page == "Shelf Gaps (Vision)":
                 except Exception as e:
                     st.warning(f"Could not persist shelf gap for {f.name}: {e}")
 
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
+        st.dataframe(pd.DataFrame(results), width='stretch')  # <- updated
 
 elif page == "Admin (DB Browser)":
     st.subheader("🗄️ Admin — Browse DuckDB Tables")
@@ -406,7 +414,7 @@ elif page == "Admin (DB Browser)":
                 q_lower = q.lower()
                 mask = inv["sku"].astype(str).str.lower().str.contains(q_lower) | inv["product_name"].astype(str).str.lower().str.contains(q_lower)
                 df_view = inv[mask]
-            st.dataframe(df_view.head(int(top_n)), use_container_width=True)
+            st.dataframe(df_view.head(int(top_n)), width='stretch')  # <- updated
             st.download_button(
                 "⬇️ Download inventory (CSV)",
                 data=df_view.to_csv(index=False).encode("utf-8"),
@@ -440,7 +448,7 @@ elif page == "Admin (DB Browser)":
             if search_chat:
                 s = search_chat.lower()
                 df_chat_view = df_chat_view[df_chat_view["content"].astype(str).str.lower().str.contains(s)]
-            st.dataframe(df_chat_view.head(int(top_n_chat)), use_container_width=True)
+            st.dataframe(df_chat_view.head(int(top_n_chat)), width='stretch')  # <- updated
             st.download_button(
                 "⬇️ Download chat logs (CSV)",
                 data=df_chat_view.to_csv(index=False).encode("utf-8"),
@@ -622,6 +630,67 @@ if page == "Chat":
               ```
             """
         )
+
+# =============================
+# Page 6: Dev Chat (Direct Graph) — NEW
+# =============================
+elif page == "Dev Chat (Direct Graph)":
+    st.subheader("💬 Dev Chat — Direct RetailDataQueryGraph")
+    # Import locally so the rest of the app runs even if this module isn't present
+    try:
+        from langchain_core.messages import HumanMessage, AIMessage
+        # Your project uses a src/ layout:
+        from src.retail_query_graph import RetailDataQueryGraph
+    except Exception as e:
+        st.error(f"Required chat deps missing: {e}")
+        st.stop()
+
+    # Separate session state from LangGraph Chat
+    if "dev_messages" not in st.session_state:
+        st.session_state.dev_messages = []
+    if "dev_query_system" not in st.session_state:
+        try:
+            st.session_state.dev_query_system = RetailDataQueryGraph()
+            st.success("Connected to retail database ✅")
+        except Exception as e:
+            st.error(f"Error connecting to database: {e}")
+            st.stop()
+
+    # Render history
+    for msg in st.session_state.dev_messages:
+        role = "user" if isinstance(msg, HumanMessage) else "assistant"
+        with st.chat_message(role):
+            st.write(msg.content)
+
+    # Input
+    prompt = st.chat_input("Ask a question about your retail data…")
+    if prompt:
+        user_msg = HumanMessage(content=prompt)
+        st.session_state.dev_messages.append(user_msg)
+        with st.chat_message("user"):
+            st.write(prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing and querying data…"):
+                try:
+                    updated = st.session_state.dev_query_system.chat(st.session_state.dev_messages)
+                    st.session_state.dev_messages = updated
+                    if updated and isinstance(updated[-1], AIMessage):
+                        st.write(updated[-1].content)
+                    else:
+                        st.error("No response generated")
+                except Exception as e:
+                    err = f"Error: {e}"
+                    st.error(err)
+                    st.session_state.dev_messages.append(AIMessage(content=f"❌ {err}"))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🗑️ Clear Dev Chat"):
+            st.session_state.dev_messages = []
+            st.rerun()
+    with c2:
+        st.caption("This page talks directly to the in-process graph (no API).")
 
 # =============================
 # --- End of File ---
