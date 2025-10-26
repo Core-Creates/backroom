@@ -24,7 +24,7 @@ except ImportError:
     print("Prophet not installed. Run: pip install prophet")
     raise
 
-from database_manager import DatabaseManager
+from db.database_manager import DatabaseManager
 
 
 class ForecastingAgent:

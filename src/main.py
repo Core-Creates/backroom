@@ -4,20 +4,20 @@ import sys
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional
-
 from dotenv import load_dotenv
+from typing import List, Optional
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 
 # --- Your existing data/logic imports ---
 # (These must be available in your environment)
-from retail_query_graph import RetailDataQueryGraph
+from .retail_query_graph import RetailDataQueryGraph
 
 # Optional/conditional imports used by inventory handler
 # (kept inside method to avoid import errors if modules are absent)
 
 # --- FastAPI bits ---
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # <-- ADDED: CORS
 from pydantic import BaseModel
 from routes.express_to_fastapi import router as items_router
 
@@ -228,6 +228,24 @@ class MemoryEnabledMain:
 # =========================
 app = FastAPI(title="Backroom API + Retail Memory")
 
+# --- CORS (Dev) ---
+# Allow local frontends during development. In production, replace with real origins.
+_default_origins = [
+    "http://localhost:3000", "http://127.0.0.1:3000",  # Next.js dev
+    "http://localhost:8501", "http://127.0.0.1:8501",  # Streamlit
+]
+# Comma-separated ORIGINS env override, e.g. "https://app.example.com,https://ops.example.com"
+_env_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+_allowed_origins = _env_origins or _default_origins
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Mount your existing router under /items to mirror Express-style grouping
 app.include_router(items_router, prefix="/items")
 
@@ -262,6 +280,12 @@ class StatsResponse(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok", "openai_key": bool(os.getenv("OPENAI_API_KEY"))}
+
+# --- NEW: simple test route for connectivity checks ---
+@app.get("/test")
+def test():
+    """Simple connectivity test endpoint for frontends / ops tools."""
+    return {"ok": True, "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
@@ -341,7 +365,7 @@ def cli_main():
                 break
             elif user_input.lower() == 'stats':
                 s = memory_system.show_conversation_stats()
-                print(f"� Conversation Stats:")
+                print("Conversation Stats:")
                 print(f"   📝 Your questions: {s['your_questions']}")
                 print(f"   🤖 AI responses: {s['ai_responses']}")
                 print(f"   💾 Memory: {s['memory']}")
