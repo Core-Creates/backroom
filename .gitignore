@@ -232,3 +232,6 @@ mlruns/
 
 m5_forecasting_accuracy/
 /node_modules
+
+# Next.js build output
+.next/
