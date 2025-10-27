@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef } from 'react'
-import { GraphConfig } from '@/lib/queryParser'
+import type { GraphConfig } from '@/lib/queryParser'
 
 interface DynamicGraphProps {
   config: GraphConfig

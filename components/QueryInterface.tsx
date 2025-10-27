@@ -1,8 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Search, BarChart3, TrendingUp, PieChart, Scatter } from 'lucide-react'
-import { QueryParser, GraphGenerator, QueryIntent, GraphConfig } from '@/lib/queryParser'
+import { BarChart3, PieChart, Search, TrendingUp } from 'lucide-react';
+import { QueryParser, GraphGenerator, type QueryIntent, type GraphConfig } from '@/lib/queryParser'
 import { DynamicGraph } from './DynamicGraph'
 
 interface QueryInterfaceProps {
@@ -113,7 +113,7 @@ export function QueryInterface({ inventoryData = [], historyData = [] }: QueryIn
       case 'forecast':
         return <TrendingUp className="h-4 w-4" />
       case 'analysis':
-        return <Scatter className="h-4 w-4" />
+        return <BarChart3 className="h-4 w-4" />
       case 'summary':
         return <PieChart className="h-4 w-4" />
       default:

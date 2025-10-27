@@ -21,7 +21,9 @@ async function apiGet<T = any>(path: string): Promise<T> {
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '(unset)'
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'upload' | 'forecast' | 'chat'>('overview')
+  const [activeTab, setActiveTab] = useState<
+  'overview' | 'upload' | 'forecast' | 'chat' | 'parquet' | 'query'
+>('overview')
   const [selectedCategory, setSelectedCategory] = useState('All Categories')
   const [isDropdownOpen, setIsDropdownOpen] = useState(false)
   const [apiOk, setApiOk] = useState<'unknown' | 'ok' | 'down'>('unknown')
